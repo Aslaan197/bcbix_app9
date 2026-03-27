@@ -1,0 +1,102 @@
+/* Custom calendar styles for soft, muted therapy session colors */
+
+/* Soft blue for ABA Therapy */
+.bg-blue-100 {
+  background-color: #dbeafe;
+}
+
+.border-blue-200 {
+  border-color: #bfdbfe;
+}
+
+.hover\:bg-blue-150:hover {
+  background-color: #d1e5fd;
+}
+
+.text-blue-900 {
+  color: #1e3a8a;
+}
+
+.text-blue-600 {
+  color: #2563eb;
+}
+
+.bg-blue-500 {
+  background-color: #3b82f6;
+}
+
+/* Soft green for Speech Therapy */
+.bg-emerald-100 {
+  background-color: #d1fae5;
+}
+
+.border-emerald-200 {
+  border-color: #a7f3d0;
+}
+
+.hover\:bg-emerald-150:hover {
+  background-color: #c2f5de;
+}
+
+.text-emerald-900 {
+  color: #064e3b;
+}
+
+.text-emerald-600 {
+  color: #059669;
+}
+
+.bg-emerald-500 {
+  background-color: #10b981;
+}
+
+/* Soft purple for Occupational Therapy */
+.bg-purple-100 {
+  background-color: #ede9fe;
+}
+
+.border-purple-200 {
+  border-color: #ddd6fe;
+}
+
+.hover\:bg-purple-150:hover {
+  background-color: #e5dffe;
+}
+
+.text-purple-900 {
+  color: #581c87;
+}
+
+.text-purple-600 {
+  color: #9333ea;
+}
+
+.bg-purple-500 {
+  background-color: #a855f7;
+}
+
+/* Smooth scrollbar for calendar views */
+.overflow-auto::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.overflow-auto::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.overflow-auto::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 5px;
+}
+
+.overflow-auto::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+/* Smooth transitions for all interactive elements */
+.transition-all {
+  transition-property: all;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 200ms;
+}
