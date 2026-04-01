@@ -126,65 +126,81 @@ export interface Database {
   public: {
     Tables: {
       learners: {
-        Row:    DbLearner;
-        Insert: Insert<DbLearner>;
-        Update: Partial<Insert<DbLearner>>;
+        Row:           DbLearner;
+        Insert:        Insert<DbLearner>;
+        Update:        Partial<Insert<DbLearner>>;
+        Relationships: [];
       };
       staff: {
-        Row:    DbStaff;
-        Insert: Insert<DbStaff>;
-        Update: Partial<Insert<DbStaff>>;
+        Row:           DbStaff;
+        Insert:        Insert<DbStaff>;
+        Update:        Partial<Insert<DbStaff>>;
+        Relationships: [];
       };
       template_categories: {
-        Row:    DbTemplateCategory;
-        Insert: DbTemplateCategory;
-        Update: Partial<DbTemplateCategory>;
+        Row:           DbTemplateCategory;
+        Insert:        DbTemplateCategory;
+        Update:        Partial<DbTemplateCategory>;
+        Relationships: [];
       };
       template_statuses: {
-        Row:    DbTemplateStatus;
-        Insert: DbTemplateStatus;
-        Update: Partial<DbTemplateStatus>;
+        Row:           DbTemplateStatus;
+        Insert:        DbTemplateStatus;
+        Update:        Partial<DbTemplateStatus>;
+        Relationships: [];
       };
       program_templates: {
-        Row:    DbProgramTemplate;
-        Insert: Omit<DbProgramTemplate, 'id' | 'created_at'>;
-        Update: Partial<Omit<DbProgramTemplate, 'id' | 'created_at'>>;
+        Row:           DbProgramTemplate;
+        Insert:        Omit<DbProgramTemplate, 'id' | 'created_at'>;
+        Update:        Partial<Omit<DbProgramTemplate, 'id' | 'created_at'>>;
+        Relationships: [];
       };
       learner_programs: {
-        Row:    DbLearnerProgram;
-        Insert: Omit<DbLearnerProgram, 'id' | 'created_at'>;
-        Update: Partial<Omit<DbLearnerProgram, 'id' | 'created_at'>>;
+        Row:           DbLearnerProgram;
+        Insert:        Omit<DbLearnerProgram, 'id' | 'created_at'>;
+        Update:        Partial<Omit<DbLearnerProgram, 'id' | 'created_at'>>;
+        Relationships: [];
       };
       sessions: {
-        Row:    DbSession;
-        Insert: Omit<DbSession, 'id' | 'created_at'>;
-        Update: Partial<Omit<DbSession, 'id' | 'created_at'>>;
+        Row:           DbSession;
+        Insert:        Omit<DbSession, 'id' | 'created_at'>;
+        Update:        Partial<Omit<DbSession, 'id' | 'created_at'>>;
+        Relationships: [];
       };
       session_data: {
-        Row:    DbSessionData;
-        Insert: Omit<DbSessionData, 'id'>;
-        Update: Partial<Omit<DbSessionData, 'id'>>;
+        Row:           DbSessionData;
+        Insert:        Omit<DbSessionData, 'id'>;
+        Update:        Partial<Omit<DbSessionData, 'id'>>;
+        Relationships: [];
       };
       phase_history: {
-        Row:    DbPhaseHistory;
-        Insert: Omit<DbPhaseHistory, 'id'>;
-        Update: Partial<Omit<DbPhaseHistory, 'id'>>;
+        Row:           DbPhaseHistory;
+        Insert:        Omit<DbPhaseHistory, 'id'>;
+        Update:        Partial<Omit<DbPhaseHistory, 'id'>>;
+        Relationships: [];
       };
       session_programs: {
-        Row:    DbSessionProgram;
-        Insert: Omit<DbSessionProgram, 'id'>;
-        Update: Partial<Omit<DbSessionProgram, 'id'>>;
+        Row:           DbSessionProgram;
+        Insert:        Omit<DbSessionProgram, 'id'>;
+        Update:        Partial<Omit<DbSessionProgram, 'id'>>;
+        Relationships: [];
       };
       session_targets: {
-        Row:    DbSessionTarget;
-        Insert: Omit<DbSessionTarget, 'id'>;
-        Update: Partial<Omit<DbSessionTarget, 'id'>>;
+        Row:           DbSessionTarget;
+        Insert:        Omit<DbSessionTarget, 'id'>;
+        Update:        Partial<Omit<DbSessionTarget, 'id'>>;
+        Relationships: [];
       };
       session_metrics: {
-        Row:    DbSessionMetric;
-        Insert: Omit<DbSessionMetric, 'id' | 'created_at'>;
-        Update: Partial<Omit<DbSessionMetric, 'id' | 'created_at'>>;
+        Row:           DbSessionMetric;
+        Insert:        Omit<DbSessionMetric, 'id' | 'created_at'>;
+        Update:        Partial<Omit<DbSessionMetric, 'id' | 'created_at'>>;
+        Relationships: [];
       };
     };
+    Views:          { [_ in never]: never };
+    Functions:      { [_ in never]: never };
+    Enums:          { [_ in never]: never };
+    CompositeTypes: { [_ in never]: never };
   };
 }

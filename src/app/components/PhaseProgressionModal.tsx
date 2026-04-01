@@ -6,8 +6,10 @@ import { Checkbox } from './ui/checkbox';
 import { Label } from './ui/label';
 import { Separator } from './ui/separator';
 import { TransitionCard } from './TransitionCard';
+import { PhaseAIAssist } from './PhaseAIAssist';
 import { getAutoMetricType } from '../lib/evaluatePhaseProgression';
 import type { PhaseProgressionConfig, PhaseTransitionRule, DataType } from './ProgramTemplatesPage';
+import type { AIPhaseConfig } from '../lib/aiPhaseConfig';
 
 interface Props {
   open:       boolean;
@@ -65,6 +67,26 @@ export function PhaseProgressionModal({
     onClose();
   }
 
+  function handleAIInsert(aiConfig: AIPhaseConfig) {
+    setDraft(prev => ({
+      ...prev,
+      rules: prev.rules.map(rule => ({
+        ...rule,
+        enabled: true,
+        accuracyThreshold:   Math.round(aiConfig.threshold * 100),
+        consecutiveSessions: aiConfig.sessions_required,
+        minTrialsPerSession: aiConfig.min_trials,
+        onFailure:           aiConfig.allow_failures > 0 ? 'allow_one' : 'reset',
+        regressionEnabled:   !!aiConfig.regression,
+        regressionThreshold: aiConfig.regression
+          ? Math.round(aiConfig.regression.threshold * 100)
+          : rule.regressionThreshold,
+        regressionSessions: aiConfig.regression?.sessions_required ?? rule.regressionSessions,
+      })),
+    }));
+    toast.success('AI configuration applied to all phase transitions');
+  }
+
   const orderedIndices = phases
     .slice(0, -1)
     .map((from, i) => draft.rules.findIndex(r => r.fromPhase === from && r.toPhase === phases[i + 1]))
@@ -75,7 +97,10 @@ export function PhaseProgressionModal({
       <DialogContent className="max-w-lg p-0 gap-0 flex flex-col" style={{ maxHeight: '85vh' }}>
         {/* Fixed header */}
         <DialogHeader className="px-5 pt-5 pb-3 flex-shrink-0">
-          <DialogTitle className="text-base font-semibold">Automatic Phase Progression</DialogTitle>
+          <div className="flex items-center justify-between">
+            <DialogTitle className="text-base font-semibold">Automatic Phase Progression</DialogTitle>
+            <PhaseAIAssist onInsert={handleAIInsert} />
+          </div>
           <p className="text-xs text-muted-foreground mt-0.5">{targetName}</p>
         </DialogHeader>
 

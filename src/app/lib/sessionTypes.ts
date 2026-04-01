@@ -1,5 +1,8 @@
 import type { DataType } from '../components/ProgramTemplatesPage';
 import type { Session } from '../components/SessionCard';
+import type { PromptStats } from './promptFading';
+
+export type { PromptStats };
 
 // ─── Set-based raw data ────────────────────────────────────────────────────────
 // Each target stores its collected data as an ordered array of "sets".
@@ -9,7 +12,7 @@ import type { Session } from '../components/SessionCard';
 export type RawTrialData =
   | {
       kind: 'percent_correct';
-      sets: Array<{ id: string; phase: string; trials: Array<'correct' | 'incorrect' | null> }>;
+      sets: Array<{ id: string; phase: string; trials: Array<'correct' | 'incorrect' | null>; trialPrompts?: Array<string | null> }>;
     }
   | {
       kind: 'frequency';
@@ -61,6 +64,8 @@ export interface TargetSummary {
   progress:    number;     // 0–100
   trials:      number;     // total trials/recordings across all sets
   rawData?:    RawTrialData;
+  /** Prompt distribution stats — populated when prompt fading is enabled on the target */
+  promptStats?: PromptStats;
 }
 
 // ─── Finalized session ────────────────────────────────────────────────────────

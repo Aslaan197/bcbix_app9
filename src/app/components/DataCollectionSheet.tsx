@@ -5,14 +5,27 @@ import {
   Hash, Activity, AlignLeft, Minus,
   CheckCircle2, XCircle, LayoutGrid, Volume2, Target,
   ClipboardList, Timer, ArrowLeft, BookOpen,
+  TrendingDown, TrendingUp,
 } from 'lucide-react';
+import {
+  PROMPT_HIERARCHY, PROMPT_LABELS,
+  fadeToNextLevel, regressToPrevLevel,
+  evaluatePromptFading,
+  computePromptStats,
+} from '../lib/promptFading';
+import type { PromptTrial } from '../lib/promptFading';
 import type { FinalizedSessionData, TargetSummary, RawTrialData } from '../lib/sessionTypes';
-import { useTheme, AppColors } from '../context/ThemeContext';
+import { useTheme } from '../context/ThemeContext';
+import type { AppColors } from '../context/ThemeContext';
 import { Session } from './SessionCard';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { ScrollArea } from './ui/scroll-area';
 import { Skeleton } from './ui/skeleton';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+  DialogFooter, DialogDescription,
+} from './ui/dialog';
 import type {
   Target as ProgramTarget, DataType,
   PromptDefinition,
@@ -31,13 +44,16 @@ import type { SessionRecord } from '../lib/evaluatePhaseProgression';
 
 // ─── Default prompts ──────────────────────────────────────────────────────────
 
+// Ordered most-to-least intrusive so that index 0 = starting level (FP) and
+// the flow progresses toward independence (I) at the last index.
+// This matches the prompt flow direction used in navigation (+1 = less intrusive).
 const DEFAULT_PROMPTS: PromptDefinition[] = [
-  { id: 'p-i',  name: 'Independent',      code: 'I',  passFail: 'pass' },
+  { id: 'p-fp', name: 'Full Physical',    code: 'FP', passFail: 'fail' },
+  { id: 'p-pp', name: 'Partial Physical', code: 'PP', passFail: 'fail' },
+  { id: 'p-m',  name: 'Model',            code: 'M',  passFail: 'fail' },
   { id: 'p-g',  name: 'Gesture',          code: 'G',  passFail: 'fail' },
   { id: 'p-v',  name: 'Verbal',           code: 'V',  passFail: 'fail' },
-  { id: 'p-m',  name: 'Model',            code: 'M',  passFail: 'fail' },
-  { id: 'p-pp', name: 'Partial Physical', code: 'PP', passFail: 'fail' },
-  { id: 'p-fp', name: 'Full Physical',    code: 'FP', passFail: 'fail' },
+  { id: 'p-i',  name: 'Independent',      code: 'I',  passFail: 'pass' },
 ];
 
 export type { ProgramTarget as DataTarget };
@@ -88,7 +104,7 @@ export type TrialResult = 'correct' | 'incorrect';
 
 interface SetBase { id: string; phase: string; }
 
-export interface PctCorrectData   { sets: Array<SetBase & { trials: (TrialResult | null)[] }> }
+export interface PctCorrectData   { sets: Array<SetBase & { trials: (TrialResult | null)[]; trialPrompts?: (string | null)[] }> }
 export interface FrequencyData    { sets: Array<SetBase & { count: number }> }
 export interface TaskAnalysisData { sets: Array<SetBase & { results: Record<string, { promptId: string; passed: boolean | null }> }> }
 export interface CustomPromptData { sets: Array<SetBase & { trials: string[] }> }
@@ -320,7 +336,7 @@ function primaryBtn(c: AppColors, isDark: boolean): React.CSSProperties {
 
 // ─── Shared "New Set" button ──────────────────────────────────────────────────
 
-function NewSetBtn({ onClick, c, setNum }: { onClick: () => void; c: AppColors; setNum: number }) {
+function NewSetBtn({ onClick, c }: { onClick: () => void; c: AppColors }) {
   return (
     <Button onClick={onClick}
       style={{ height: 28, padding: '0 10px', display: 'flex', alignItems: 'center', gap: 5, borderRadius: 'var(--radius-button)', border: `1px dashed ${c.border}`, backgroundColor: 'transparent', color: c.t2, cursor: 'pointer', fontFamily: 'inherit', fontSize: 11, fontWeight: 500 }}
@@ -348,18 +364,133 @@ function PrevSetsSummary({ labels, c, isDark }: { labels: string[]; c: AppColors
 
 // ─── 1. Percent Correct ───────────────────────────────────────────────────────
 
-function PercentCorrectEntry({ target, data, onChange, c, isDark }: {
-  target: ProgramTarget; data: PctCorrectData; onChange: (d: PctCorrectData) => void; c: AppColors; isDark: boolean;
+function PercentCorrectEntry({ target, data, onChange, onPromptLevelChange, c, isDark }: {
+  target: ProgramTarget;
+  data: PctCorrectData;
+  onChange: (d: PctCorrectData) => void;
+  onPromptLevelChange?: (newLevel: string) => void;
+  c: AppColors;
+  isDark: boolean;
 }) {
+  const fading = target.promptFading;
+  const fadingEnabled = fading?.enabled ?? false;
+
+  // Prompt flow order: use target.config.prompts (the configured flow) when fading is on
+  const flowPrompts = target.config.prompts ?? DEFAULT_PROMPTS;
+  const pcExcludedCodes      = fading?.excludedPromptCodes ?? [];
+  const pcActiveFlowPrompts  = flowPrompts.filter(p => !pcExcludedCodes.includes(p.code));
+  const pcRemovedFlowPrompts = flowPrompts.filter(p =>  pcExcludedCodes.includes(p.code));
+  const pcGetLabel = (code: string) =>
+    flowPrompts.find(p => p.code === code)?.name ??
+    (PROMPT_LABELS as Record<string, string>)[code] ?? code;
+
+  // selectedPrompt = current fading reference level (first in flow; updated by fade/regress events)
+  // trialPrompt    = therapist's explicit choice for the NEXT trial (null until they tap)
+  const [selectedPrompt, setSelectedPrompt] = useState<string>(
+    target.currentPromptLevel ?? pcActiveFlowPrompts[0]?.code ?? PROMPT_HIERARCHY[0],
+  );
+  const [trialPrompt, setTrialPrompt] = useState<string | null>(null);
+  const [showAllPromptsPC, setShowAllPromptsPC] = useState(false);
+
+  // Inline feedback shown after a rolling-window decision.
+  const [fadeMsg, setFadeMsg] = useState<{ text: string; dir: 'fade' | 'regress' } | null>(null);
+  const fadeMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showFadeMsg(text: string, dir: 'fade' | 'regress') {
+    if (fadeMsgTimer.current) clearTimeout(fadeMsgTimer.current);
+    setFadeMsg({ text, dir });
+    fadeMsgTimer.current = setTimeout(() => setFadeMsg(null), 3500);
+  }
+  useEffect(() => () => { if (fadeMsgTimer.current) clearTimeout(fadeMsgTimer.current); }, []);
+
   const setIdx = data.sets.length - 1;
   const curSet = data.sets[setIdx];
 
-  const updateTrials = (trials: (TrialResult | null)[]) => {
-    const sets = [...data.sets]; sets[setIdx] = { ...curSet, trials };
+  // ── Core trial update ──────────────────────────────────────────────────────
+  const updateTrials = (
+    trials: (TrialResult | null)[],
+    trialPrompts?: (string | null)[],
+  ) => {
+    const sets = [...data.sets];
+    sets[setIdx] = { ...curSet, trials, trialPrompts };
     onChange({ sets });
   };
+
+  // ── Record a trial (correct or incorrect) ─────────────────────────────────
+  function handleRecord(result: TrialResult) {
+    // Use the therapist's explicit tap if they chose one, otherwise fall back to fading level
+    const usedPrompt  = trialPrompt ?? selectedPrompt;
+    const newTrials   = [...curSet.trials, result];
+    const prevPrompts = curSet.trialPrompts ?? curSet.trials.map(() => null as null);
+    const newPrompts  = [...prevPrompts, usedPrompt];
+    updateTrials(newTrials, newPrompts);
+    setTrialPrompt(null); // reset explicit selection after each trial
+
+    // Rolling window evaluation (only when prompt fading is on)
+    if (!fadingEnabled || !fading) return;
+
+    // Build all session trials newest-first (including the one just recorded)
+    const allTrials: PromptTrial[] = [];
+    allTrials.push({ isCorrect: result === 'correct', promptLevel: usedPrompt });
+
+    // Existing trials in current set, newest first
+    for (let i = curSet.trials.length - 1; i >= 0; i--) {
+      if (curSet.trials[i] !== null) {
+        allTrials.push({
+          isCorrect:   curSet.trials[i] === 'correct',
+          promptLevel: (curSet.trialPrompts ?? [])[i] ?? selectedPrompt,
+        });
+      }
+    }
+    // Previous sets, newest set first
+    for (let si = data.sets.length - 2; si >= 0; si--) {
+      const s = data.sets[si];
+      for (let ti = s.trials.length - 1; ti >= 0; ti--) {
+        if (s.trials[ti] !== null) {
+          allTrials.push({
+            isCorrect:   s.trials[ti] === 'correct',
+            promptLevel: (s.trialPrompts ?? [])[ti] ?? selectedPrompt,
+          });
+        }
+      }
+    }
+
+    // Build session groups when sessions-mode evaluation is configured
+    const evalType     = fading.evaluationType ?? 'trials';
+    const sessionGroups: PromptTrial[][] | undefined = evalType === 'sessions'
+      ? [...data.sets].reverse().map(s =>
+          s.trials.reduce<PromptTrial[]>((acc, t, i) => {
+            if (t !== null) {
+              acc.push({ isCorrect: t === 'correct', promptLevel: (s.trialPrompts ?? [])[i] ?? selectedPrompt });
+            }
+            return acc;
+          }, [])
+        )
+      : undefined;
+
+    const decision = evaluatePromptFading(usedPrompt, allTrials, fading, sessionGroups);
+
+    if (decision === 'fade') {
+      const next = fadeToNextLevel(usedPrompt);
+      if (next) {
+        setSelectedPrompt(next);
+        setTrialPrompt(null);
+        showFadeMsg(`Prompt faded to ${pcGetLabel(next)}`, 'fade');
+        onPromptLevelChange?.(next);
+      }
+    } else if (decision === 'regress') {
+      const prev = regressToPrevLevel(usedPrompt);
+      if (prev) {
+        setSelectedPrompt(prev);
+        setTrialPrompt(null);
+        showFadeMsg(`Moved back to ${pcGetLabel(prev)}`, 'regress');
+        onPromptLevelChange?.(prev);
+      }
+    }
+  }
+
   const addNewSet = () => {
-    onChange({ sets: [...data.sets, { ...newSetBase(target.phase), trials: [] }] });
+    onChange({ sets: [...data.sets, { ...newSetBase(target.phase), trials: [], trialPrompts: [] }] });
   };
 
   const done    = curSet.trials.filter(t => t !== null);
@@ -372,41 +503,148 @@ function PercentCorrectEntry({ target, data, onChange, c, isDark }: {
         <span style={{ fontSize: 11, fontWeight: 700, color: c.t3, textTransform: 'uppercase', letterSpacing: '0.07em', fontFamily: 'inherit' }}>
           Set {setIdx + 1}
         </span>
-        <NewSetBtn onClick={addNewSet} c={c} setNum={setIdx + 2} />
+        <NewSetBtn onClick={addNewSet} c={c} />
       </div>
 
+      {/* ── Prompt Fading UI (only when enabled) ── */}
+      {fadingEnabled && (
+        <div style={{ marginBottom: 20 }}>
+          {/* Current prompt — informational indicator (not auto-selected) */}
+          <div style={{ fontSize: 13, fontWeight: 600, color: '#4F83CC', fontFamily: 'inherit', marginBottom: 4 }}>
+            {selectedPrompt} — {pcGetLabel(selectedPrompt)}
+          </div>
+
+          {!showAllPromptsPC ? (
+            <button type="button" onClick={() => setShowAllPromptsPC(true)}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: c.t3, fontSize: 11, fontFamily: 'inherit', padding: 0, display: 'block', marginBottom: 10 }}
+            >Show all prompts</button>
+          ) : (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 4 }}>
+                {/* Active flow prompts first */}
+                {pcActiveFlowPrompts.map(p => {
+                  const isTrialSelected = trialPrompt === p.code;
+                  const isCurrentLevel  = !trialPrompt && selectedPrompt === p.code;
+                  return (
+                    <Button key={p.code}
+                      onClick={() => { setTrialPrompt(p.code); setSelectedPrompt(p.code); }}
+                      style={{
+                        height: 34, padding: '0 12px',
+                        borderRadius: 'var(--radius-button)',
+                        border: isTrialSelected ? 'none'
+                          : isCurrentLevel ? `1.5px solid #4F83CC`
+                          : `1.5px solid ${c.border}`,
+                        backgroundColor: isTrialSelected
+                          ? (isDark ? 'rgba(79,131,204,0.28)' : 'rgba(79,131,204,0.16)')
+                          : 'transparent',
+                        color: isTrialSelected ? '#4F83CC' : isCurrentLevel ? '#4F83CC' : c.t2,
+                        cursor: 'pointer', fontFamily: 'inherit',
+                        fontSize: 12, fontWeight: isTrialSelected ? 700 : 500,
+                        transition: 'all 0.12s',
+                      }}
+                    >{p.code} — {pcGetLabel(p.code)}</Button>
+                  );
+                })}
+                {/* Removed prompts at bottom — still selectable */}
+                {pcRemovedFlowPrompts.map(p => {
+                  const isTrialSelected = trialPrompt === p.code;
+                  return (
+                    <Button key={p.code}
+                      onClick={() => { setTrialPrompt(p.code); setSelectedPrompt(p.code); }}
+                      style={{
+                        height: 34, padding: '0 12px',
+                        borderRadius: 'var(--radius-button)',
+                        border: isTrialSelected ? 'none' : `1.5px solid ${c.border}`,
+                        backgroundColor: isTrialSelected
+                          ? (isDark ? 'rgba(79,131,204,0.28)' : 'rgba(79,131,204,0.16)')
+                          : 'transparent',
+                        color: isTrialSelected ? '#4F83CC' : c.t3,
+                        cursor: 'pointer', fontFamily: 'inherit',
+                        fontSize: 12, fontWeight: isTrialSelected ? 700 : 500,
+                        opacity: 0.75, transition: 'all 0.12s',
+                      }}
+                    >{p.code} — {pcGetLabel(p.code)}</Button>
+                  );
+                })}
+              </div>
+              <button type="button" onClick={() => setShowAllPromptsPC(false)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: c.t3, fontSize: 11, fontFamily: 'inherit', padding: 0, display: 'block' }}
+              >Hide prompts</button>
+            </div>
+          )}
+
+          {/* Inline fade / regression feedback */}
+          {fadeMsg && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              marginTop: 6, padding: '7px 12px', borderRadius: 7,
+              backgroundColor: fadeMsg.dir === 'fade'
+                ? (isDark ? 'rgba(46,158,99,0.14)' : 'rgba(46,158,99,0.09)')
+                : (isDark ? 'rgba(220,38,38,0.14)' : 'rgba(220,38,38,0.07)'),
+              color: fadeMsg.dir === 'fade' ? '#2E9E63' : (isDark ? '#f87171' : '#c0392b'),
+              fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+            }}>
+              {fadeMsg.dir === 'fade' ? <TrendingDown size={13} /> : <TrendingUp size={13} />}
+              {fadeMsg.text}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Score display ── */}
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 24 }}>
         <span style={{ fontSize: 48, fontWeight: 700, color: c.t0, fontFamily: 'inherit', lineHeight: 1 }}>{pct !== null ? `${pct}%` : '—'}</span>
         <span style={{ fontSize: 13, color: c.t3, fontFamily: 'inherit' }}>{done.length > 0 ? `${correct} correct / ${done.length} trials` : 'No trials yet'}</span>
       </div>
 
+      {/* ── Record buttons ── */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 24 }}>
-        <Button onClick={() => updateTrials([...curSet.trials, 'correct'])}
+        <Button onClick={() => fadingEnabled ? handleRecord('correct') : updateTrials([...curSet.trials, 'correct'])}
           style={{ flex: 1, height: 60, ...primaryBtn(c, isDark), backgroundColor: isDark ? 'rgba(46,158,99,0.18)' : 'rgba(46,158,99,0.10)', color: '#2E9E63', border: 'none' }}
         ><Check size={20} /> Correct</Button>
-        <Button onClick={() => updateTrials([...curSet.trials, 'incorrect'])}
+        <Button onClick={() => fadingEnabled ? handleRecord('incorrect') : updateTrials([...curSet.trials, 'incorrect'])}
           style={{ flex: 1, height: 60, ...primaryBtn(c, isDark), backgroundColor: isDark ? 'rgba(220,38,38,0.18)' : 'rgba(220,38,38,0.08)', color: isDark ? '#f87171' : '#c0392b', border: 'none' }}
         ><XCircle size={20} /> Incorrect</Button>
       </div>
 
+      {/* ── Trial history chips ── */}
       {curSet.trials.length > 0 && (
         <div>
           <div style={{ fontSize: 10, fontWeight: 700, color: c.t3, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8, fontFamily: 'inherit' }}>Trials</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-            {curSet.trials.map((t, i) => (
-              <Button key={i}
-                onClick={() => { const next = [...curSet.trials]; next[i] = next[i] === 'correct' ? 'incorrect' : 'correct'; updateTrials(next); }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 4, height: 28, padding: '0 10px',
-                  borderRadius: 'var(--radius-button)', border: 'none', cursor: 'pointer', fontFamily: 'inherit',
-                  fontSize: 11, fontWeight: 500,
-                  backgroundColor: t === 'correct' ? (isDark ? 'rgba(46,158,99,0.22)' : 'rgba(46,158,99,0.12)') : (isDark ? 'rgba(220,38,38,0.22)' : 'rgba(220,38,38,0.08)'),
-                  color: t === 'correct' ? '#2E9E63' : (isDark ? '#f87171' : '#c0392b'),
-                }}
-              >{t === 'correct' ? <Check size={11} /> : <XCircle size={11} />} {i + 1}</Button>
-            ))}
+            {curSet.trials.map((t, i) => {
+              const promptCode = (curSet.trialPrompts ?? [])[i];
+              return (
+                <Button key={i}
+                  onClick={() => {
+                    const next = [...curSet.trials];
+                    next[i] = next[i] === 'correct' ? 'incorrect' : 'correct';
+                    updateTrials(next, curSet.trialPrompts);
+                  }}
+                  title={promptCode ? `Prompt: ${PROMPT_LABELS[promptCode as keyof typeof PROMPT_LABELS] ?? promptCode}` : undefined}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 4, height: 28, padding: '0 10px',
+                    borderRadius: 'var(--radius-button)', border: 'none', cursor: 'pointer', fontFamily: 'inherit',
+                    fontSize: 11, fontWeight: 500,
+                    backgroundColor: t === 'correct' ? (isDark ? 'rgba(46,158,99,0.22)' : 'rgba(46,158,99,0.12)') : (isDark ? 'rgba(220,38,38,0.22)' : 'rgba(220,38,38,0.08)'),
+                    color: t === 'correct' ? '#2E9E63' : (isDark ? '#f87171' : '#c0392b'),
+                  }}
+                >
+                  {t === 'correct' ? <Check size={11} /> : <XCircle size={11} />}
+                  {i + 1}
+                  {promptCode && fadingEnabled && (
+                    <span style={{ fontFamily: 'monospace', fontSize: 9, opacity: 0.7, marginLeft: 1 }}>{promptCode}</span>
+                  )}
+                </Button>
+              );
+            })}
           </div>
-          <Button onClick={() => updateTrials(curSet.trials.slice(0, -1))}
+          <Button onClick={() => {
+            updateTrials(
+              curSet.trials.slice(0, -1),
+              curSet.trialPrompts ? curSet.trialPrompts.slice(0, -1) : undefined,
+            );
+          }}
             style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: c.t3, fontSize: 11, fontFamily: 'inherit', padding: '2px 0' }}
           ><RotateCcw size={11} /> Undo last trial</Button>
         </div>
@@ -445,7 +683,7 @@ function FrequencyEntry({ target, data, onChange, c, isDark }: {
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, paddingTop: 8 }}>
       <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: c.t3, textTransform: 'uppercase', letterSpacing: '0.07em', fontFamily: 'inherit' }}>Set {setIdx + 1}</span>
-        <NewSetBtn onClick={addNewSet} c={c} setNum={setIdx + 2} />
+        <NewSetBtn onClick={addNewSet} c={c} />
       </div>
       <div style={{ fontSize: 72, fontWeight: 700, color: c.t0, fontFamily: 'inherit', lineHeight: 1 }}>{curSet.count}</div>
       <div style={{ fontSize: 11, color: c.t3, fontFamily: 'inherit' }}>occurrences recorded</div>
@@ -471,13 +709,38 @@ function FrequencyEntry({ target, data, onChange, c, isDark }: {
 
 // ─── 3. Task Analysis ─────────────────────────────────────────────────────────
 
-function TaskAnalysisEntry({ target, data, onChange, c, isDark }: {
-  target: ProgramTarget; data: TaskAnalysisData; onChange: (d: TaskAnalysisData) => void; c: AppColors; isDark: boolean;
+function TaskAnalysisEntry({ target, data, onChange, onPromptLevelChange, c, isDark }: {
+  target: ProgramTarget; data: TaskAnalysisData; onChange: (d: TaskAnalysisData) => void;
+  onPromptLevelChange?: (level: string) => void;
+  c: AppColors; isDark: boolean;
 }) {
   const tasks   = target.config.tasks ?? [];
   const prompts = target.config.prompts ?? DEFAULT_PROMPTS;
   const setIdx  = data.sets.length - 1;
   const curSet  = data.sets[setIdx];
+
+  const fading        = target.promptFading;
+  const fadingEnabled = fading?.enabled ?? false;
+
+  const taExcludedCodes      = fading?.excludedPromptCodes ?? [];
+  const taActiveFlowPrompts  = prompts.filter(p => !taExcludedCodes.includes(p.code));
+  const taRemovedFlowPrompts = prompts.filter(p =>  taExcludedCodes.includes(p.code));
+  const taGetLabel = (code: string) => prompts.find(p => p.code === code)?.name ?? code;
+
+  const [selectedPrompt, setSelectedPrompt] = useState<string>(
+    target.currentPromptLevel ?? taActiveFlowPrompts[0]?.code ?? (prompts[0]?.code ?? ''),
+  );
+  const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
+  const [pendingPrompt, setPendingPrompt]   = useState<string | null>(null);
+  const [fadeMsg, setFadeMsg] = useState<{ text: string; dir: 'fade' | 'regress' } | null>(null);
+  const fadeMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showFadeMsg(text: string, dir: 'fade' | 'regress') {
+    if (fadeMsgTimer.current) clearTimeout(fadeMsgTimer.current);
+    setFadeMsg({ text, dir });
+    fadeMsgTimer.current = setTimeout(() => setFadeMsg(null), 3500);
+  }
+  useEffect(() => () => { if (fadeMsgTimer.current) clearTimeout(fadeMsgTimer.current); }, []);
 
   const freshResults = () => Object.fromEntries(tasks.map(tk => [tk.id, { promptId: '', passed: null as null }]));
 
@@ -485,13 +748,155 @@ function TaskAnalysisEntry({ target, data, onChange, c, isDark }: {
     const sets = [...data.sets]; sets[setIdx] = { ...curSet, results };
     onChange({ sets });
   };
+
+  // ── Prompt fading evaluation ─────────────────────────────────────────────────
+  // Accuracy = independent correct (passFail=pass) / total eligible trials.
+  // isEndOfSession=true  → called from addNewSet; current set is complete, include it.
+  // isEndOfSession=false → called per task-tap; current set still in progress.
+  function runTaFadingEval(
+    currentResults: typeof curSet.results,
+    allSets:        typeof data.sets,
+    isEndOfSession: boolean,
+  ) {
+    if (!fadingEnabled || !fading) return;
+
+    const taActiveCodes  = new Set(taActiveFlowPrompts.map(p => p.code));
+    const taFwdThreshold = fading.accuracyThreshold   ?? 0.80;
+    const taBwdThreshold = fading.regressionThreshold ?? 0.50;
+    const taMinTrials    = Math.max(1, fading.minTrials            ?? 3);
+    const taRegMinTrials = Math.max(1, fading.regressionWindowSize ?? 3);
+    const taEvalType     = fading.evaluationType ?? 'trials';
+    const taMinS         = Math.max(1, fading.minSessions ?? 3);
+
+    let taDecision: 'fade' | 'regress' | 'hold' = 'hold';
+
+    if (taEvalType === 'sessions') {
+      // Sessions mode: only use completed sets.
+      // When called mid-session, the current set isn't done — exclude it.
+      // When called at end-of-session, all sets in allSets are complete.
+      const completedSets = isEndOfSession ? allSets : allSets.slice(0, -1);
+
+      if (completedSets.length < taMinS) {
+        console.log(`[PromptFading][TA] Sessions: ${completedSets.length}/${taMinS} completed, hold`);
+        return;
+      }
+
+      const sessionGroups: PromptTrial[][] = [...completedSets].reverse().map(s =>
+        tasks.flatMap<PromptTrial>(tk => {
+          const r = s.results[tk.id];
+          if (!r || r.passed === null || !r.promptId) return [];
+          const pr = prompts.find(p => p.id === r.promptId);
+          if (!pr) return [];
+          return [{ isCorrect: r.passed === true, promptLevel: pr.code }];
+        })
+      );
+
+      const recentGroups = sessionGroups.slice(0, taMinS);
+      let allPassFwd = true;
+      let allFailBwd = fading.regressionEnabled;
+
+      for (let i = 0; i < recentGroups.length; i++) {
+        const sg    = recentGroups[i];
+        const elig  = sg.filter(t => taActiveCodes.has(t.promptLevel));
+        const total = elig.length;
+        const pass  = elig.filter(t => t.isCorrect).length;
+        const acc   = total > 0 ? pass / total : 0;
+        const accPct = Math.round(acc * 100);
+        console.log(
+          `[PromptFading][TA] Session ${i + 1}: total=${total} indep=${pass} accuracy=${accPct}%` +
+          ` fwd>=${Math.round(taFwdThreshold * 100)}% bwd<${Math.round(taBwdThreshold * 100)}%`,
+        );
+        if (total < taMinTrials || acc < taFwdThreshold) allPassFwd = false;
+        if (total < 1 || acc >= taBwdThreshold) allFailBwd = false;
+      }
+
+      if (allPassFwd) taDecision = 'fade';
+      else if (allFailBwd) taDecision = 'regress';
+      console.log(`[PromptFading][TA] Sessions decision: ${taDecision}`);
+
+    } else {
+      // Trials mode: aggregate every recorded task result across all sets.
+      const allTrials: PromptTrial[] = [];
+
+      // Current set's results (caller passes the already-updated object)
+      for (let ti = tasks.length - 1; ti >= 0; ti--) {
+        const r = currentResults[tasks[ti].id];
+        if (!r || r.passed === null || !r.promptId) continue;
+        const pr = prompts.find(p => p.id === r.promptId);
+        if (pr) allTrials.push({ isCorrect: r.passed === true, promptLevel: pr.code });
+      }
+      // Previous completed sets (all except current)
+      const prevSets = allSets.slice(0, -1);
+      for (let si = prevSets.length - 1; si >= 0; si--) {
+        for (let ti = tasks.length - 1; ti >= 0; ti--) {
+          const r = prevSets[si].results[tasks[ti].id];
+          if (!r || r.passed === null || !r.promptId) continue;
+          const pr = prompts.find(p => p.id === r.promptId);
+          if (pr) allTrials.push({ isCorrect: r.passed === true, promptLevel: pr.code });
+        }
+      }
+
+      const taElig        = allTrials.filter(t => taActiveCodes.has(t.promptLevel));
+      const taTotalTrials = taElig.length;
+      const taPassCount   = taElig.filter(t => t.isCorrect).length;
+      const taAccuracyVal = taTotalTrials > 0 ? taPassCount / taTotalTrials : 0;
+      const taAccuracyPct = Math.round(taAccuracyVal * 100);
+
+      console.log(
+        `[PromptFading][TA] Trials: total=${taTotalTrials} indep=${taPassCount} accuracy=${taAccuracyPct}%` +
+        ` fwd>=${Math.round(taFwdThreshold * 100)}% bwd<${Math.round(taBwdThreshold * 100)}%` +
+        ` minTrials=${taMinTrials} regMin=${taRegMinTrials}`,
+      );
+
+      if (taTotalTrials >= taMinTrials) {
+        if (taAccuracyVal >= taFwdThreshold) taDecision = 'fade';
+        else if (fading.regressionEnabled && taTotalTrials >= taRegMinTrials && taAccuracyVal < taBwdThreshold) taDecision = 'regress';
+      }
+      console.log(`[PromptFading][TA] Trials decision: ${taDecision}`);
+    }
+
+    // Apply decision via flow-indexed navigation.
+    // Flow is stored as [most-intrusive → ... → least-intrusive] (index 0 = start, last = goal).
+    // Fade  = move to HIGHER index (next step toward independence).
+    // Regress = move to LOWER  index (step back toward more support).
+    const taFlowIdx = taActiveFlowPrompts.findIndex(p => p.code === selectedPrompt);
+    if (taDecision === 'fade') {
+      const nextPrompt = taFlowIdx >= 0 && taFlowIdx < taActiveFlowPrompts.length - 1
+        ? taActiveFlowPrompts[taFlowIdx + 1] : null;
+      if (nextPrompt) {
+        console.log(`[PromptFading][TA] Forward: ${selectedPrompt} → ${nextPrompt.code}`);
+        setSelectedPrompt(nextPrompt.code);
+        showFadeMsg(`Prompt faded to ${taGetLabel(nextPrompt.code)}`, 'fade');
+        onPromptLevelChange?.(nextPrompt.code);
+      } else {
+        console.log(`[PromptFading][TA] Already at most-independent level (${selectedPrompt}), no further fade`);
+      }
+    } else if (taDecision === 'regress') {
+      const prevPrompt = taFlowIdx > 0 ? taActiveFlowPrompts[taFlowIdx - 1] : null;
+      if (prevPrompt) {
+        console.log(`[PromptFading][TA] Backward: ${selectedPrompt} → ${prevPrompt.code}`);
+        setSelectedPrompt(prevPrompt.code);
+        showFadeMsg(`Moved back to ${taGetLabel(prevPrompt.code)}`, 'regress');
+        onPromptLevelChange?.(prevPrompt.code);
+      } else {
+        console.log(`[PromptFading][TA] Already at most-intrusive level (${selectedPrompt}), no further regress`);
+      }
+    }
+  }
+
   const selectPrompt = (taskId: string, prompt: PromptDefinition) => {
-    updateResults({ ...curSet.results, [taskId]: { promptId: prompt.id, passed: prompt.passFail === 'pass' } });
+    const newResults = { ...curSet.results, [taskId]: { promptId: prompt.id, passed: prompt.passFail === 'pass' } };
+    updateResults(newResults);
+    runTaFadingEval(newResults, data.sets, false);
   };
+
   const clearTask = (taskId: string) => {
     updateResults({ ...curSet.results, [taskId]: { promptId: '', passed: null } });
   };
   const addNewSet = () => {
+    // Run end-of-session evaluation before creating the new set so the just-completed
+    // session is treated as a fully completed set (isEndOfSession=true).
+    runTaFadingEval(curSet.results, data.sets, true);
     onChange({ sets: [...data.sets, { ...newSetBase(target.phase), results: freshResults() }] });
   };
 
@@ -513,15 +918,92 @@ function TaskAnalysisEntry({ target, data, onChange, c, isDark }: {
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
           <span style={{ fontSize: 11, fontWeight: 700, color: c.t3, textTransform: 'uppercase', letterSpacing: '0.07em', fontFamily: 'inherit' }}>Set {setIdx + 1}</span>
-          <NewSetBtn onClick={addNewSet} c={c} setNum={setIdx + 2} />
+          <NewSetBtn onClick={addNewSet} c={c} />
         </div>
       </div>
 
+      {/* ── Active Prompt dropdown + fade feedback (Task Analysis) ── */}
+      {fadingEnabled && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 11, color: c.t3, fontFamily: 'inherit', flexShrink: 0 }}>Active Prompt</span>
+            <select
+              value={selectedPrompt}
+              onChange={e => { if (e.target.value !== selectedPrompt) setPendingPrompt(e.target.value); }}
+              style={{
+                height: 30, padding: '0 8px', borderRadius: 6,
+                border: `1px solid ${c.border}`, backgroundColor: c.inputBg,
+                color: c.t0, fontSize: 12, fontFamily: 'inherit', cursor: 'pointer',
+              }}
+            >
+              {taActiveFlowPrompts.map(p => (
+                <option key={p.id} value={p.code}>{p.code} — {p.name}</option>
+              ))}
+            </select>
+          </div>
+
+          {fadeMsg && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6, marginTop: 8,
+              padding: '6px 12px', borderRadius: 7,
+              backgroundColor: fadeMsg.dir === 'fade'
+                ? (isDark ? 'rgba(46,158,99,0.14)' : 'rgba(46,158,99,0.09)')
+                : (isDark ? 'rgba(220,38,38,0.14)' : 'rgba(220,38,38,0.07)'),
+              color: fadeMsg.dir === 'fade' ? '#2E9E63' : (isDark ? '#f87171' : '#c0392b'),
+              fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+            }}>
+              {fadeMsg.dir === 'fade' ? <TrendingDown size={13} /> : <TrendingUp size={13} />}
+              {fadeMsg.text}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Active Prompt change confirmation ── */}
+      <Dialog open={pendingPrompt !== null} onOpenChange={v => { if (!v) setPendingPrompt(null); }}>
+        <DialogContent style={{ backgroundColor: c.surface, border: `1px solid ${c.border}`, maxWidth: 380 }}>
+          <DialogHeader>
+            <DialogTitle style={{ fontFamily: 'inherit', fontSize: 14, color: c.t0 }}>Change Active Prompt?</DialogTitle>
+            <DialogDescription style={{ fontFamily: 'inherit', fontSize: 12, color: c.t2, marginTop: 6, lineHeight: 1.5 }}>
+              Changing the active prompt will update the current prompt level for this target.
+              This change will affect future trials.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter style={{ gap: 8, marginTop: 4 }}>
+            <Button variant="ghost" size="sm" onClick={() => setPendingPrompt(null)}
+              style={{ fontFamily: 'inherit' }}>Cancel</Button>
+            <Button size="sm" onClick={() => {
+              if (pendingPrompt) {
+                setSelectedPrompt(pendingPrompt);
+                onPromptLevelChange?.(pendingPrompt);
+              }
+              setPendingPrompt(null);
+            }} style={{ fontFamily: 'inherit' }}>Confirm</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {tasks.map((task, i) => {
-          const r      = curSet.results[task.id] ?? { promptId: '', passed: null };
-          const selPr  = prompts.find(p => p.id === r.promptId);
+          const r       = curSet.results[task.id] ?? { promptId: '', passed: null };
+          const selPr   = prompts.find(p => p.id === r.promptId);
           const passed2 = r.passed;
+
+          // Per-task prompt visibility when fading is enabled
+          const isTaskExpanded = expandedTasks.has(task.id);
+          const currentPromptObj = fadingEnabled
+            ? taActiveFlowPrompts.find(p => p.code === selectedPrompt) : null;
+          const defaultVisibleIds = fadingEnabled ? new Set([
+            ...(currentPromptObj ? [currentPromptObj.id] : []),
+            ...taRemovedFlowPrompts.map(p => p.id),
+            ...(r.promptId ? [r.promptId] : []),  // always show already-selected
+          ]) : null;
+          const hasHiddenPrompts = fadingEnabled && !!defaultVisibleIds
+            && prompts.some(p => !defaultVisibleIds.has(p.id));
+          const taskVisiblePrompts = (fadingEnabled && defaultVisibleIds && !isTaskExpanded)
+            ? prompts.filter(p => defaultVisibleIds.has(p.id))
+            : prompts;
+
           return (
             <div key={task.id} style={{
               borderRadius: 'var(--radius)',
@@ -546,8 +1028,10 @@ function TaskAnalysisEntry({ target, data, onChange, c, isDark }: {
                   >clear</Button>
                 )}
               </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {prompts.map(prompt => {
+
+              {/* Prompt buttons — filtered per-task when fading is on */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: hasHiddenPrompts ? 4 : 0 }}>
+                {taskVisiblePrompts.map(prompt => {
                   const isSelected = r.promptId === prompt.id;
                   const passColor  = prompt.passFail === 'pass' ? '#2E9E63' : (isDark ? '#f87171' : '#c0392b');
                   return (
@@ -555,17 +1039,35 @@ function TaskAnalysisEntry({ target, data, onChange, c, isDark }: {
                       onClick={() => selectPrompt(task.id, prompt)}
                       title={`${prompt.name} → ${prompt.passFail === 'pass' ? 'PASS' : 'FAIL'}`}
                       style={{
-                        height: 34, minWidth: 42, padding: '0 10px',
+                        height: 34, padding: '0 12px',
                         borderRadius: 'var(--radius-button)', border: '1.5px solid',
                         borderColor: isSelected ? passColor : c.border,
-                        backgroundColor: isSelected ? (prompt.passFail === 'pass' ? (isDark ? 'rgba(46,158,99,0.22)' : 'rgba(46,158,99,0.12)') : (isDark ? 'rgba(220,38,38,0.22)' : 'rgba(220,38,38,0.10)')) : 'transparent',
+                        backgroundColor: isSelected
+                          ? (prompt.passFail === 'pass'
+                              ? (isDark ? 'rgba(46,158,99,0.22)' : 'rgba(46,158,99,0.12)')
+                              : (isDark ? 'rgba(220,38,38,0.22)' : 'rgba(220,38,38,0.10)'))
+                          : 'transparent',
                         color: isSelected ? passColor : c.t2,
-                        cursor: 'pointer', fontFamily: 'monospace', fontSize: 12, fontWeight: 700,
+                        cursor: 'pointer', fontFamily: 'monospace',
+                        fontSize: 12, fontWeight: isSelected ? 700 : 500,
                       }}
                     >{prompt.code}</Button>
                   );
                 })}
               </div>
+
+              {/* Show/hide remaining flow prompts */}
+              {hasHiddenPrompts && (
+                <button type="button"
+                  onClick={() => setExpandedTasks(prev => {
+                    const next = new Set(prev);
+                    isTaskExpanded ? next.delete(task.id) : next.add(task.id);
+                    return next;
+                  })}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: c.t3, fontSize: 11, fontFamily: 'inherit', padding: '3px 0 0', display: 'block' }}
+                >{isTaskExpanded ? 'Hide prompts' : 'Show all prompts'}</button>
+              )}
+
               {selPr && (
                 <div style={{ marginTop: 6, fontSize: 11, color: passed2 === true ? '#2E9E63' : (isDark ? '#f87171' : '#c0392b'), fontFamily: 'inherit' }}>
                   {selPr.name} → {passed2 === true ? 'PASS ✓' : 'FAIL ✗'}
@@ -590,33 +1092,280 @@ function TaskAnalysisEntry({ target, data, onChange, c, isDark }: {
 
 // ─── 4. Custom Prompt ─────────────────────────────────────────────────────────
 
-function CustomPromptEntry({ target, data, onChange, c, isDark }: {
-  target: ProgramTarget; data: CustomPromptData; onChange: (d: CustomPromptData) => void; c: AppColors; isDark: boolean;
+function CustomPromptEntry({ target, data, onChange, onPromptLevelChange, c, isDark }: {
+  target: ProgramTarget; data: CustomPromptData; onChange: (d: CustomPromptData) => void;
+  onPromptLevelChange?: (level: string) => void;
+  c: AppColors; isDark: boolean;
 }) {
   const prompts = target.config.prompts ?? DEFAULT_PROMPTS;
   const setIdx  = data.sets.length - 1;
   const curSet  = data.sets[setIdx];
+
+  const fading        = target.promptFading;
+  const fadingEnabled = fading?.enabled ?? false;
+
+  const cpExcludedCodes      = fading?.excludedPromptCodes ?? [];
+  const cpActiveFlowPrompts  = prompts.filter(p => !cpExcludedCodes.includes(p.code));
+  const cpRemovedFlowPrompts = prompts.filter(p =>  cpExcludedCodes.includes(p.code));
+  const cpGetLabel = (code: string) => prompts.find(p => p.code === code)?.name ?? code;
+
+  const [selectedPrompt, setSelectedPrompt] = useState<string>(
+    target.currentPromptLevel ?? cpActiveFlowPrompts[0]?.code ?? (prompts[0]?.code ?? ''),
+  );
+  const [expandedTrials, setExpandedTrials] = useState<Set<number>>(new Set());
+  const [pendingPrompt, setPendingPrompt]   = useState<string | null>(null);
+  const [fadeMsg, setFadeMsg] = useState<{ text: string; dir: 'fade' | 'regress' } | null>(null);
+  const fadeMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showFadeMsg(text: string, dir: 'fade' | 'regress') {
+    if (fadeMsgTimer.current) clearTimeout(fadeMsgTimer.current);
+    setFadeMsg({ text, dir });
+    fadeMsgTimer.current = setTimeout(() => setFadeMsg(null), 3500);
+  }
+  useEffect(() => () => { if (fadeMsgTimer.current) clearTimeout(fadeMsgTimer.current); }, []);
 
   const updateTrials = (trials: string[]) => {
     const sets = [...data.sets]; sets[setIdx] = { ...curSet, trials };
     onChange({ sets });
   };
   const addNewSet = () => {
+    // Run end-of-session evaluation before creating the new set so the just-completed
+    // session is treated as a fully completed set (isEndOfSession=true).
+    runCpFadingEval(curSet.trials, data.sets, true);
     onChange({ sets: [...data.sets, { ...newSetBase(target.phase), trials: [] }] });
   };
 
+  // Add a new trial — always empty, no prompt pre-selected
+  function handleAddTrial() {
+    updateTrials([...curSet.trials, '']);
+  }
+
+  // ── Prompt fading evaluation ─────────────────────────────────────────────────
+  // Accuracy = independent correct (passFail=pass) / total eligible trials.
+  // isEndOfSession=true  → called from addNewSet; current set is complete, include it.
+  // isEndOfSession=false → called per trial-tap; current set still in progress.
+  function runCpFadingEval(
+    currentTrials:  string[],         // current set's trials AFTER the latest selection
+    allSets:        typeof data.sets,
+    isEndOfSession: boolean,
+  ) {
+    if (!fadingEnabled || !fading) return;
+
+    const cpActiveCodes  = new Set(cpActiveFlowPrompts.map(p => p.code));
+    const cpFwdThreshold = fading.accuracyThreshold   ?? 0.80;
+    const cpBwdThreshold = fading.regressionThreshold ?? 0.50;
+    const cpMinTrials    = Math.max(1, fading.minTrials            ?? 3);
+    const cpRegMinTrials = Math.max(1, fading.regressionWindowSize ?? 3);
+    const cpEvalType     = fading.evaluationType ?? 'trials';
+    const cpMinS         = Math.max(1, fading.minSessions ?? 3);
+
+    let cpDecision: 'fade' | 'regress' | 'hold' = 'hold';
+
+    if (cpEvalType === 'sessions') {
+      // Sessions mode: only use completed sets.
+      const completedSets = isEndOfSession ? allSets : allSets.slice(0, -1);
+
+      if (completedSets.length < cpMinS) {
+        console.log(`[PromptFading][CP] Sessions: ${completedSets.length}/${cpMinS} completed, hold`);
+        return;
+      }
+
+      const sessionGroups: PromptTrial[][] = [...completedSets].reverse().map(s =>
+        s.trials.reduce<PromptTrial[]>((acc, pid) => {
+          if (!pid) return acc;
+          const pr = prompts.find(p => p.id === pid);
+          if (pr) acc.push({ isCorrect: pr.passFail === 'pass', promptLevel: pr.code });
+          return acc;
+        }, [])
+      );
+
+      const recentGroups = sessionGroups.slice(0, cpMinS);
+      let allPassFwd = true;
+      let allFailBwd = fading.regressionEnabled;
+
+      for (let i = 0; i < recentGroups.length; i++) {
+        const sg    = recentGroups[i];
+        const elig  = sg.filter(t => cpActiveCodes.has(t.promptLevel));
+        const total = elig.length;
+        const pass  = elig.filter(t => t.isCorrect).length;
+        const acc   = total > 0 ? pass / total : 0;
+        const accPct = Math.round(acc * 100);
+        console.log(
+          `[PromptFading][CP] Session ${i + 1}: total=${total} indep=${pass} accuracy=${accPct}%` +
+          ` fwd>=${Math.round(cpFwdThreshold * 100)}% bwd<${Math.round(cpBwdThreshold * 100)}%`,
+        );
+        if (total < cpMinTrials || acc < cpFwdThreshold) allPassFwd = false;
+        if (total < 1 || acc >= cpBwdThreshold) allFailBwd = false;
+      }
+
+      if (allPassFwd) cpDecision = 'fade';
+      else if (allFailBwd) cpDecision = 'regress';
+      console.log(`[PromptFading][CP] Sessions decision: ${cpDecision}`);
+
+    } else {
+      // Trials mode: aggregate every recorded trial across all sets.
+      const allTrials: PromptTrial[] = [];
+
+      // Current set's trials (caller passes the already-updated array)
+      for (let ti = currentTrials.length - 1; ti >= 0; ti--) {
+        const pid = currentTrials[ti];
+        if (!pid) continue;
+        const pr = prompts.find(p => p.id === pid);
+        if (pr) allTrials.push({ isCorrect: pr.passFail === 'pass', promptLevel: pr.code });
+      }
+      // Previous completed sets (all except current)
+      const prevSets = allSets.slice(0, -1);
+      for (let si = prevSets.length - 1; si >= 0; si--) {
+        for (let ti = prevSets[si].trials.length - 1; ti >= 0; ti--) {
+          const pid = prevSets[si].trials[ti];
+          if (!pid) continue;
+          const pr = prompts.find(p => p.id === pid);
+          if (pr) allTrials.push({ isCorrect: pr.passFail === 'pass', promptLevel: pr.code });
+        }
+      }
+
+      const cpElig        = allTrials.filter(t => cpActiveCodes.has(t.promptLevel));
+      const cpTotalTrials = cpElig.length;
+      const cpPassCount   = cpElig.filter(t => t.isCorrect).length;
+      const cpAccuracyVal = cpTotalTrials > 0 ? cpPassCount / cpTotalTrials : 0;
+      const cpAccuracyPct = Math.round(cpAccuracyVal * 100);
+
+      console.log(
+        `[PromptFading][CP] Trials: total=${cpTotalTrials} indep=${cpPassCount} accuracy=${cpAccuracyPct}%` +
+        ` fwd>=${Math.round(cpFwdThreshold * 100)}% bwd<${Math.round(cpBwdThreshold * 100)}%` +
+        ` minTrials=${cpMinTrials} regMin=${cpRegMinTrials}`,
+      );
+
+      if (cpTotalTrials >= cpMinTrials) {
+        if (cpAccuracyVal >= cpFwdThreshold) cpDecision = 'fade';
+        else if (fading.regressionEnabled && cpTotalTrials >= cpRegMinTrials && cpAccuracyVal < cpBwdThreshold) cpDecision = 'regress';
+      }
+      console.log(`[PromptFading][CP] Trials decision: ${cpDecision}`);
+    }
+
+    // Apply decision via flow-indexed navigation.
+    // Flow is stored as [most-intrusive → ... → least-intrusive] (index 0 = start, last = goal).
+    // Fade  = move to HIGHER index (next step toward independence).
+    // Regress = move to LOWER  index (step back toward more support).
+    const cpFlowIdx = cpActiveFlowPrompts.findIndex(p => p.code === selectedPrompt);
+    if (cpDecision === 'fade') {
+      const nextPrompt = cpFlowIdx >= 0 && cpFlowIdx < cpActiveFlowPrompts.length - 1
+        ? cpActiveFlowPrompts[cpFlowIdx + 1] : null;
+      if (nextPrompt) {
+        console.log('[PromptFading][CP] Forward:', selectedPrompt, '→', nextPrompt.code);
+        setSelectedPrompt(nextPrompt.code);
+        showFadeMsg(`Prompt faded to ${cpGetLabel(nextPrompt.code)}`, 'fade');
+        onPromptLevelChange?.(nextPrompt.code);
+      } else {
+        console.log(`[PromptFading][CP] Already at most-independent level (${selectedPrompt}), no further fade`);
+      }
+    } else if (cpDecision === 'regress') {
+      const prevPrompt = cpFlowIdx > 0 ? cpActiveFlowPrompts[cpFlowIdx - 1] : null;
+      if (prevPrompt) {
+        console.log('[PromptFading][CP] Backward:', selectedPrompt, '→', prevPrompt.code);
+        setSelectedPrompt(prevPrompt.code);
+        showFadeMsg(`Moved back to ${cpGetLabel(prevPrompt.code)}`, 'regress');
+        onPromptLevelChange?.(prevPrompt.code);
+      } else {
+        console.log(`[PromptFading][CP] Already at most-intrusive level (${selectedPrompt}), no further regress`);
+      }
+    }
+  }
+
+  function handleTrialPromptSelect(trialIdx: number, prompt: PromptDefinition) {
+    const nextTrials = [...curSet.trials];
+    nextTrials[trialIdx] = prompt.id;
+    updateTrials(nextTrials);
+    runCpFadingEval(nextTrials, data.sets, false);
+  }
+
   const counts: Record<string, number> = {};
   curSet.trials.forEach(pid => { if (pid) counts[pid] = (counts[pid] ?? 0) + 1; });
+
+  // Accuracy = (sum of trial scores) / total trials  where pass→100, fail→0
+  // = pass_count / total * 100  (mathematically equivalent, no per-set averaging)
+  const cpCurTotal = curSet.trials.filter(pid => !!pid).length;
+  const cpCurPass  = curSet.trials.filter(pid => {
+    if (!pid) return false;
+    const pr = prompts.find(p => p.id === pid);
+    return pr?.passFail === 'pass';
+  }).length;
+  const cpCurAccuracy = cpCurTotal > 0 ? Math.round((cpCurPass / cpCurTotal) * 100) : null;
 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-          <span style={{ fontSize: 44, fontWeight: 700, color: c.t0, fontFamily: 'inherit', lineHeight: 1 }}>{curSet.trials.length}</span>
-          <span style={{ fontSize: 13, color: c.t3, fontFamily: 'inherit' }}>trials in set {setIdx + 1}</span>
+          <span style={{ fontSize: 44, fontWeight: 700, color: c.t0, fontFamily: 'inherit', lineHeight: 1 }}>
+            {cpCurAccuracy !== null ? `${cpCurAccuracy}%` : '—'}
+          </span>
+          <span style={{ fontSize: 13, color: c.t3, fontFamily: 'inherit' }}>
+            {cpCurTotal} trials · {cpCurPass} pass · set {setIdx + 1}
+          </span>
         </div>
-        <NewSetBtn onClick={addNewSet} c={c} setNum={setIdx + 2} />
+        <NewSetBtn onClick={addNewSet} c={c} />
       </div>
+
+      {/* ── Active Prompt dropdown + fade feedback (Custom Prompt) ── */}
+      {fadingEnabled && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 11, color: c.t3, fontFamily: 'inherit', flexShrink: 0 }}>Active Prompt</span>
+            <select
+              value={selectedPrompt}
+              onChange={e => { if (e.target.value !== selectedPrompt) setPendingPrompt(e.target.value); }}
+              style={{
+                height: 30, padding: '0 8px', borderRadius: 6,
+                border: `1px solid ${c.border}`, backgroundColor: c.inputBg,
+                color: c.t0, fontSize: 12, fontFamily: 'inherit', cursor: 'pointer',
+              }}
+            >
+              {cpActiveFlowPrompts.map(p => (
+                <option key={p.id} value={p.code}>{p.code} — {p.name}</option>
+              ))}
+            </select>
+          </div>
+
+          {fadeMsg && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6, marginTop: 8,
+              padding: '6px 12px', borderRadius: 7,
+              backgroundColor: fadeMsg.dir === 'fade'
+                ? (isDark ? 'rgba(46,158,99,0.14)' : 'rgba(46,158,99,0.09)')
+                : (isDark ? 'rgba(220,38,38,0.14)' : 'rgba(220,38,38,0.07)'),
+              color: fadeMsg.dir === 'fade' ? '#2E9E63' : (isDark ? '#f87171' : '#c0392b'),
+              fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+            }}>
+              {fadeMsg.dir === 'fade' ? <TrendingDown size={13} /> : <TrendingUp size={13} />}
+              {fadeMsg.text}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Active Prompt change confirmation ── */}
+      <Dialog open={pendingPrompt !== null} onOpenChange={v => { if (!v) setPendingPrompt(null); }}>
+        <DialogContent style={{ backgroundColor: c.surface, border: `1px solid ${c.border}`, maxWidth: 380 }}>
+          <DialogHeader>
+            <DialogTitle style={{ fontFamily: 'inherit', fontSize: 14, color: c.t0 }}>Change Active Prompt?</DialogTitle>
+            <DialogDescription style={{ fontFamily: 'inherit', fontSize: 12, color: c.t2, marginTop: 6, lineHeight: 1.5 }}>
+              Changing the active prompt will update the current prompt level for this target.
+              This change will affect future trials.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter style={{ gap: 8, marginTop: 4 }}>
+            <Button variant="ghost" size="sm" onClick={() => setPendingPrompt(null)}
+              style={{ fontFamily: 'inherit' }}>Cancel</Button>
+            <Button size="sm" onClick={() => {
+              if (pendingPrompt) {
+                setSelectedPrompt(pendingPrompt);
+                onPromptLevelChange?.(pendingPrompt);
+              }
+              setPendingPrompt(null);
+            }} style={{ fontFamily: 'inherit' }}>Confirm</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {Object.keys(counts).length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 16 }}>
@@ -631,37 +1380,74 @@ function CustomPromptEntry({ target, data, onChange, c, isDark }: {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
         {curSet.trials.map((trialId, i) => {
           const selPr = prompts.find(p => p.id === trialId);
+
+          // Per-trial visibility when fading is enabled
+          const isTrialExpanded = expandedTrials.has(i);
+          const currentPromptObj = fadingEnabled
+            ? cpActiveFlowPrompts.find(p => p.code === selectedPrompt) : null;
+          const defaultVisibleIds = fadingEnabled ? new Set([
+            ...(currentPromptObj ? [currentPromptObj.id] : []),
+            ...cpRemovedFlowPrompts.map(p => p.id),
+            ...(trialId ? [trialId] : []),  // always show already-selected
+          ]) : null;
+          const hasHiddenPrompts = fadingEnabled && !!defaultVisibleIds
+            && prompts.some(p => !defaultVisibleIds.has(p.id));
+          const trialVisiblePrompts = (fadingEnabled && defaultVisibleIds && !isTrialExpanded)
+            ? prompts.filter(p => defaultVisibleIds.has(p.id))
+            : prompts;
+
           return (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 11, color: c.t3, fontFamily: 'inherit', width: 52, flexShrink: 0 }}>Trial {i + 1}</span>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, flex: 1 }}>
-                {prompts.map(prompt => {
-                  const isSelected = trialId === prompt.id;
-                  return (
-                    <Button key={prompt.id}
-                      onClick={() => { const next = [...curSet.trials]; next[i] = prompt.id; updateTrials(next); }}
-                      title={prompt.name}
-                      style={{
-                        height: 32, minWidth: 38, padding: '0 8px',
-                        borderRadius: 'var(--radius-button)', border: '1.5px solid',
-                        borderColor: isSelected ? '#4F83CC' : c.border,
-                        backgroundColor: isSelected ? (isDark ? 'rgba(79,131,204,0.22)' : 'rgba(79,131,204,0.12)') : 'transparent',
-                        color: isSelected ? '#4F83CC' : c.t2,
-                        cursor: 'pointer', fontFamily: 'monospace', fontSize: 11, fontWeight: 700,
-                      }}
-                    >{prompt.code}</Button>
-                  );
-                })}
+            <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+              <span style={{ fontSize: 11, color: c.t3, fontFamily: 'inherit', width: 52, flexShrink: 0, paddingTop: 10 }}>Trial {i + 1}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: hasHiddenPrompts ? 4 : 0 }}>
+                  {trialVisiblePrompts.map(prompt => {
+                    const isSelected = trialId === prompt.id;
+                    const passColor  = prompt.passFail === 'pass' ? '#2E9E63' : (isDark ? '#f87171' : '#c0392b');
+                    return (
+                      <Button key={prompt.id}
+                        onClick={() => handleTrialPromptSelect(i, prompt)}
+                        title={`${prompt.name} → ${prompt.passFail === 'pass' ? 'PASS' : 'FAIL'}`}
+                        style={{
+                          height: 32, padding: '0 10px',
+                          borderRadius: 'var(--radius-button)', border: '1.5px solid',
+                          borderColor: isSelected ? passColor : c.border,
+                          backgroundColor: isSelected
+                            ? (prompt.passFail === 'pass'
+                                ? (isDark ? 'rgba(46,158,99,0.22)' : 'rgba(46,158,99,0.12)')
+                                : (isDark ? 'rgba(220,38,38,0.22)' : 'rgba(220,38,38,0.10)'))
+                            : 'transparent',
+                          color: isSelected ? passColor : c.t2,
+                          cursor: 'pointer', fontFamily: 'monospace', fontSize: 11, fontWeight: 700,
+                        }}
+                      >{prompt.code}</Button>
+                    );
+                  })}
+                </div>
+                {hasHiddenPrompts && (
+                  <button type="button"
+                    onClick={() => setExpandedTrials(prev => {
+                      const next = new Set(prev);
+                      isTrialExpanded ? next.delete(i) : next.add(i);
+                      return next;
+                    })}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: c.t3, fontSize: 11, fontFamily: 'inherit', padding: '2px 0 0', display: 'block' }}
+                  >{isTrialExpanded ? 'Hide prompts' : 'Show all prompts'}</button>
+                )}
+                {selPr && (
+                  <span style={{ display: 'block', marginTop: 4, fontSize: 11, color: fadingEnabled ? (selPr.passFail === 'pass' ? '#2E9E63' : (isDark ? '#f87171' : '#c0392b')) : c.t3, fontFamily: 'inherit' }}>
+                    {selPr.name}{fadingEnabled ? ` → ${selPr.passFail === 'pass' ? 'PASS ✓' : 'FAIL ✗'}` : ''}
+                  </span>
+                )}
               </div>
-              {selPr && <span style={{ fontSize: 11, color: c.t3, fontFamily: 'inherit', flexShrink: 0 }}>{selPr.name}</span>}
               <Button onClick={() => updateTrials(curSet.trials.filter((_, j) => j !== i))}
-                style={{ width: 26, height: 26, border: 'none', background: 'none', cursor: 'pointer', color: c.t3, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, flexShrink: 0 }}
+                style={{ width: 26, height: 26, border: 'none', background: 'none', cursor: 'pointer', color: c.t3, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, flexShrink: 0, marginTop: 3 }}
               ><Trash2 size={12} /></Button>
             </div>
           );
         })}
       </div>
-      <Button onClick={() => updateTrials([...curSet.trials, ''])}
+      <Button onClick={handleAddTrial}
         style={{ height: 34, padding: '0 14px', display: 'flex', alignItems: 'center', gap: 6, borderRadius: 'var(--radius-button)', border: `1px dashed ${c.border}`, backgroundColor: 'transparent', color: c.t2, cursor: 'pointer', fontFamily: 'inherit', fontSize: 11, fontWeight: 500 }}
       ><Plus size={12} /> Add Trial</Button>
 
@@ -710,7 +1496,7 @@ function DurationEntry({ target, data, onChange, c, isDark }: {
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0 }}>
       <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: c.t3, textTransform: 'uppercase', letterSpacing: '0.07em', fontFamily: 'inherit' }}>Set {setIdx + 1}</span>
-        <NewSetBtn onClick={addNewSet} c={c} setNum={setIdx + 2} />
+        <NewSetBtn onClick={addNewSet} c={c} />
       </div>
       <div style={{ fontSize: 68, fontWeight: 700, color: timer.running ? c.t0 : c.t2, fontFamily: 'inherit', lineHeight: 1, marginBottom: 6, fontVariantNumeric: 'tabular-nums' }}>
         {fmtSecs(timer.seconds)}
@@ -784,7 +1570,7 @@ function TextEntry({ target, data, onChange, c }: {
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: c.t3, textTransform: 'uppercase', letterSpacing: '0.07em', fontFamily: 'inherit' }}>Note — Set {setIdx + 1}</span>
-        <NewSetBtn onClick={addNewSet} c={c} setNum={setIdx + 2} />
+        <NewSetBtn onClick={addNewSet} c={c} />
       </div>
       <textarea value={curSet.text} onChange={e => updateText(e.target.value)}
         placeholder="Write your observations, notes, or anecdotal record here…"
@@ -847,7 +1633,7 @@ function RateEntry({ target, data, onChange, c, isDark }: {
         ) : (
           <span style={{ fontSize: 11, fontWeight: 700, color: c.t3, textTransform: 'uppercase', letterSpacing: '0.07em', fontFamily: 'inherit' }}>Set {setIdx + 1}</span>
         )}
-        <NewSetBtn onClick={addNewSet} c={c} setNum={setIdx + 2} />
+        <NewSetBtn onClick={addNewSet} c={c} />
       </div>
 
       <div style={{ padding: '16px', borderRadius: 'var(--radius)', border: `1px solid ${c.border}`, backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', marginBottom: 16 }}>
@@ -1268,7 +2054,7 @@ function CustomFormEntry({ target, data, onChange, c, isDark }: {
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: c.t3, textTransform: 'uppercase', letterSpacing: '0.07em', fontFamily: 'inherit' }}>Set {setIdx + 1}</span>
-        <NewSetBtn onClick={addNewSet} c={c} setNum={setIdx + 2} />
+        <NewSetBtn onClick={addNewSet} c={c} />
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {fields.map(field => (
@@ -1312,15 +2098,16 @@ function CustomFormEntry({ target, data, onChange, c, isDark }: {
 
 // ─── Data Entry Dispatcher ────────────────────────────────────────────────────
 
-function DataEntryArea({ target, rawData, onChangeData, onAutoSave, c, isDark }: {
+function DataEntryArea({ target, rawData, onChangeData, onAutoSave, onPromptLevelChange, c, isDark }: {
   target: ProgramTarget; rawData: unknown; onChangeData: (d: unknown) => void;
-  onAutoSave?: (d: unknown) => void; c: AppColors; isDark: boolean;
+  onAutoSave?: (d: unknown) => void; onPromptLevelChange?: (level: string) => void;
+  c: AppColors; isDark: boolean;
 }) {
   switch (target.dataType) {
-    case 'Percent Correct':  return <PercentCorrectEntry target={target} data={rawData as PctCorrectData}   onChange={onChangeData} c={c} isDark={isDark} />;
+    case 'Percent Correct':  return <PercentCorrectEntry target={target} data={rawData as PctCorrectData}   onChange={onChangeData} onPromptLevelChange={onPromptLevelChange} c={c} isDark={isDark} />;
     case 'Frequency':        return <FrequencyEntry       target={target} data={rawData as FrequencyData}    onChange={onChangeData} c={c} isDark={isDark} />;
-    case 'Task Analysis':    return <TaskAnalysisEntry    target={target} data={rawData as TaskAnalysisData} onChange={onChangeData} c={c} isDark={isDark} />;
-    case 'Custom Prompt':    return <CustomPromptEntry    target={target} data={rawData as CustomPromptData} onChange={onChangeData} c={c} isDark={isDark} />;
+    case 'Task Analysis':    return <TaskAnalysisEntry    target={target} data={rawData as TaskAnalysisData} onChange={onChangeData} onPromptLevelChange={onPromptLevelChange} c={c} isDark={isDark} />;
+    case 'Custom Prompt':    return <CustomPromptEntry    target={target} data={rawData as CustomPromptData} onChange={onChangeData} onPromptLevelChange={onPromptLevelChange} c={c} isDark={isDark} />;
     case 'Duration':         return <DurationEntry        target={target} data={rawData as DurationData}    onChange={onChangeData} c={c} isDark={isDark} />;
     case 'Text Anecdotal':   return <TextEntry            target={target} data={rawData as TextData}        onChange={onChangeData} c={c} isDark={isDark} />;
     case 'Rate':             return <RateEntry            target={target} data={rawData as RateData}        onChange={onChangeData} c={c} isDark={isDark} />;
@@ -1534,6 +2321,18 @@ export function DataCollectionSheet({ session, onClose, onFinalize }: DataCollec
     });
   }
 
+  // ── Persist current prompt level for a target ─────────────────────────────
+  function updateTargetPromptLevel(targetId: string, newLevel: string) {
+    const progId = targetProgram[targetId];
+    if (!progId || progId === 'mock') return;
+    const prog = programs.find(p => p.id === progId);
+    if (!prog) return;
+    const updatedTargets = prog.targets.map(t =>
+      t.id === targetId ? { ...t, currentPromptLevel: newLevel } : t,
+    );
+    updateProgram(progId, { targets: updatedTargets });
+  }
+
   // ── Persist progress ──────────────────────────────────────────────────────
   function persistProgress() {
     const programTargets: Record<string, ProgramTarget[]> = {};
@@ -1555,7 +2354,13 @@ export function DataCollectionSheet({ session, onClose, onFinalize }: DataCollec
     switch (t.dataType) {
       case 'Percent Correct': {
         const d = data as PctCorrectData;
-        return { kind: 'percent_correct', sets: d.sets.map(s => ({ id: s.id, phase: s.phase, trials: s.trials })) };
+        return {
+          kind: 'percent_correct',
+          sets: d.sets.map(s => ({
+            id: s.id, phase: s.phase, trials: s.trials,
+            ...(s.trialPrompts ? { trialPrompts: s.trialPrompts } : {}),
+          })),
+        };
       }
       case 'Frequency': {
         const d = data as FrequencyData;
@@ -1824,6 +2629,47 @@ export function DataCollectionSheet({ session, onClose, onFinalize }: DataCollec
       lg.programs.forEach(pg => {
         pg.targets.forEach(t => {
           const data = sessionData[t.id];
+
+          // Compute prompt distribution stats for targets with fading enabled
+          let promptStats: import('../lib/promptFading').PromptStats | undefined;
+          const configPrompts = t.config.prompts ?? DEFAULT_PROMPTS;
+          if (t.promptFading?.enabled && data) {
+            if (t.dataType === 'Percent Correct') {
+              const d         = data as PctCorrectData;
+              const allTrials = d.sets.flatMap(s => s.trials);
+              const allPromps = d.sets.flatMap(s => s.trialPrompts ?? s.trials.map(() => null));
+              promptStats     = computePromptStats(allTrials, allPromps);
+            } else if (t.dataType === 'Task Analysis') {
+              const d = data as TaskAnalysisData;
+              const tasks = t.config.tasks ?? [];
+              const trialResults: ('correct' | 'incorrect' | null)[] = [];
+              const trialPrompts: (string | null)[] = [];
+              for (const s of d.sets) {
+                for (const task of tasks) {
+                  const r  = s.results[task.id];
+                  const pr = r?.promptId ? configPrompts.find(p => p.id === r.promptId) : null;
+                  if (!r || r.passed === null) { trialResults.push(null); trialPrompts.push(null); continue; }
+                  trialResults.push(r.passed ? 'correct' : 'incorrect');
+                  trialPrompts.push(pr?.code ?? null);
+                }
+              }
+              promptStats = computePromptStats(trialResults, trialPrompts);
+            } else if (t.dataType === 'Custom Prompt') {
+              const d = data as CustomPromptData;
+              const trialResults: ('correct' | 'incorrect' | null)[] = [];
+              const trialPrompts: (string | null)[] = [];
+              for (const s of d.sets) {
+                for (const pid of s.trials) {
+                  const pr = pid ? configPrompts.find(p => p.id === pid) : null;
+                  if (!pr) { trialResults.push(null); trialPrompts.push(null); continue; }
+                  trialResults.push(pr.passFail === 'pass' ? 'correct' : 'incorrect');
+                  trialPrompts.push(pr.code);
+                }
+              }
+              promptStats = computePromptStats(trialResults, trialPrompts);
+            }
+          }
+
           summaryTargets.push({
             targetId:    t.id,
             sessionId:   session.id ?? '',
@@ -1835,6 +2681,7 @@ export function DataCollectionSheet({ session, onClose, onFinalize }: DataCollec
             progress:    calcProgress(t, data) ?? 0,
             trials:      countTrials(t.dataType, data),
             rawData:     buildRawData(t, data),
+            promptStats,
           });
         });
       });
@@ -2034,6 +2881,7 @@ export function DataCollectionSheet({ session, onClose, onFinalize }: DataCollec
                     rawData={sessionData[activeTarget.id] ?? initData(activeTarget)}
                     onChangeData={d => setSessionData(prev => ({ ...prev, [activeTarget.id]: d }))}
                     onAutoSave={d => autoSave(activeTarget.id, d, activeTarget.dataType)}
+                    onPromptLevelChange={newLevel => updateTargetPromptLevel(activeTarget.id, newLevel)}
                     c={c} isDark={isDark}
                   />
                 </div>

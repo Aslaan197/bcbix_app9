@@ -3,8 +3,9 @@ import {
   Bell, Search, Settings, Sun, Moon, SunMoon,
   HelpCircle, ExternalLink, ChevronRight, LogOut, Link2,
   ChevronsRight, Calendar, User, Stethoscope,
-  Clock, Sparkles, RefreshCw, CheckCheck,
+  Clock, Sparkles, RefreshCw, CheckCheck, Menu,
 } from 'lucide-react';
+import { useIsMobile } from '../../hooks/useIsMobile';
 import { useTheme, AppTheme } from '../context/ThemeContext';
 import type { AppColors } from '../context/ThemeContext';
 import type { Session } from './SessionCard';
@@ -32,6 +33,8 @@ export interface TopRibbonProps {
   onToggleCollapse: () => void;
   onOpenSettings: () => void;
   sessions: Session[];
+  /** Mobile: open the sidebar drawer */
+  onMenuOpen?: () => void;
 }
 
 type ResultKind = 'session' | 'student' | 'provider' | 'service';
@@ -437,8 +440,10 @@ export function TopRibbon({
   onToggleCollapse,
   onOpenSettings,
   sessions,
+  onMenuOpen,
 }: TopRibbonProps) {
   const { colors: c, isDark } = useTheme();
+  const isMobile = useIsMobile();
   const [commandOpen, setCommandOpen] = useState(false);
 
   // ⌘K / Ctrl+K shortcut
@@ -467,9 +472,24 @@ export function TopRibbon({
           transition: 'background-color 0.2s',
         }}
       >
-        {/* ── Left: Logo + app name ──────────────────────────────────────── */}
+        {/* ── Left: Hamburger (mobile) + Logo + app name ────────────────── */}
         <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 7 }}>
-          {sidebarCollapsed && (
+          {/* Hamburger — mobile only */}
+          {isMobile && (
+            <Button
+              variant="ghost" size="icon"
+              onClick={onMenuOpen}
+              className="h-8 w-8 rounded-lg"
+              style={{ color: c.t2, marginRight: 2 }}
+              title="Open menu"
+              aria-label="Open navigation menu"
+            >
+              <Menu style={{ width: 18, height: 18 }} />
+            </Button>
+          )}
+
+          {/* Desktop collapse toggle */}
+          {!isMobile && sidebarCollapsed && (
             <Button
               variant="ghost" size="icon"
               onClick={onToggleCollapse}
@@ -488,38 +508,55 @@ export function TopRibbon({
           </span>
         </div>
 
-        {/* ── Center: Command palette trigger (256px) ───────────────────── */}
-        <div style={{ flex: 1, display: 'flex', justifyContent: 'center', padding: '0 20px' }}>
-          <button
-            onClick={() => setCommandOpen(true)}
-            style={{
-              width: 256, height: 32,
-              display: 'flex', alignItems: 'center', gap: 8,
-              paddingLeft: 10, paddingRight: 10,
-              backgroundColor: c.sideBg,
-              border: `1px solid ${c.inputBorder}`,
-              borderRadius: 8,
-              cursor: 'pointer', outline: 'none',
-              transition: 'border-color 0.15s, background-color 0.15s',
-              fontFamily: 'inherit',
-            }}
-            onMouseEnter={e => {
-              (e.currentTarget as HTMLElement).style.borderColor = c.inputFocus;
-              (e.currentTarget as HTMLElement).style.backgroundColor = c.surface;
-            }}
-            onMouseLeave={e => {
-              (e.currentTarget as HTMLElement).style.borderColor = c.inputBorder;
-              (e.currentTarget as HTMLElement).style.backgroundColor = c.sideBg;
-            }}
-          >
-            <Search style={{ width: 13, height: 13, color: c.t3, flexShrink: 0 }} />
-            <span style={{ flex: 1, fontSize: 13, color: c.t3, textAlign: 'left', userSelect: 'none' }}>
-              Search
-            </span>
-            <kbd style={{ fontSize: 10, color: c.t3, backgroundColor: c.navHover, border: `1px solid ${c.border}`, borderRadius: 4, padding: '1px 5px', fontFamily: 'inherit', lineHeight: 1.6, flexShrink: 0 }}>
-              ⌘K
-            </kbd>
-          </button>
+        {/* ── Center: Command palette trigger ───────────────────────────── */}
+        <div style={{ flex: 1, display: 'flex', justifyContent: 'center', padding: isMobile ? '0 8px' : '0 20px' }}>
+          {/* Desktop: full search bar */}
+          {!isMobile && (
+            <button
+              onClick={() => setCommandOpen(true)}
+              style={{
+                width: 256, height: 32,
+                display: 'flex', alignItems: 'center', gap: 8,
+                paddingLeft: 10, paddingRight: 10,
+                backgroundColor: c.sideBg,
+                border: `1px solid ${c.inputBorder}`,
+                borderRadius: 8,
+                cursor: 'pointer', outline: 'none',
+                transition: 'border-color 0.15s, background-color 0.15s',
+                fontFamily: 'inherit',
+              }}
+              onMouseEnter={e => {
+                (e.currentTarget as HTMLElement).style.borderColor = c.inputFocus;
+                (e.currentTarget as HTMLElement).style.backgroundColor = c.surface;
+              }}
+              onMouseLeave={e => {
+                (e.currentTarget as HTMLElement).style.borderColor = c.inputBorder;
+                (e.currentTarget as HTMLElement).style.backgroundColor = c.sideBg;
+              }}
+            >
+              <Search style={{ width: 13, height: 13, color: c.t3, flexShrink: 0 }} />
+              <span style={{ flex: 1, fontSize: 13, color: c.t3, textAlign: 'left', userSelect: 'none' }}>
+                Search
+              </span>
+              <kbd style={{ fontSize: 10, color: c.t3, backgroundColor: c.navHover, border: `1px solid ${c.border}`, borderRadius: 4, padding: '1px 5px', fontFamily: 'inherit', lineHeight: 1.6, flexShrink: 0 }}>
+                ⌘K
+              </kbd>
+            </button>
+          )}
+
+          {/* Mobile: icon-only search button */}
+          {isMobile && (
+            <Button
+              variant="ghost" size="icon"
+              onClick={() => setCommandOpen(true)}
+              className="h-8 w-8 rounded-lg"
+              style={{ color: c.t3 }}
+              title="Search (⌘K)"
+              aria-label="Open search"
+            >
+              <Search style={{ width: 17, height: 17 }} />
+            </Button>
+          )}
         </div>
 
         {/* ── Right: Bell · Profile Avatar ──────────────────────────────── */}

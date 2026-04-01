@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import { ChevronLeft, ChevronRight, ChevronsUpDown } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { ChevronLeft, ChevronRight, ChevronsUpDown, X } from 'lucide-react';
 import { HugeiconsIcon } from '@hugeicons/react';
 import type { IconSvgElement } from '@hugeicons/react';
 import { useTheme } from '../context/ThemeContext';
+import { useIsMobile } from '../../hooks/useIsMobile';
 import { ScrollArea } from './ui/scroll-area';
 import { Button } from './ui/button';
 
@@ -92,6 +93,10 @@ export interface AppSidebarProps {
   currentDate: Date;
   onDateSelect: (date: Date) => void;
   visibleRange?: { start: Date; end: Date };
+  /** Mobile drawer: controlled open state */
+  mobileOpen?: boolean;
+  /** Mobile drawer: callback to close */
+  onMobileClose?: () => void;
 }
 
 // ─── Workspace Switcher ────────────────────────────────────────────────────────
@@ -154,9 +159,23 @@ export function AppSidebar({
   currentDate,
   onDateSelect,
   visibleRange,
+  mobileOpen = false,
+  onMobileClose,
 }: AppSidebarProps) {
   const { colors, isDark } = useTheme();
+  const isMobile = useIsMobile();
   const [miniDate, setMiniDate] = useState(new Date());
+
+  // ── Body scroll lock when mobile sidebar is open ──────────────────────────
+  useEffect(() => {
+    if (!isMobile) return;
+    if (mobileOpen) {
+      document.body.classList.add('mobile-sidebar-open');
+    } else {
+      document.body.classList.remove('mobile-sidebar-open');
+    }
+    return () => { document.body.classList.remove('mobile-sidebar-open'); };
+  }, [isMobile, mobileOpen]);
 
   // Mini calendar helpers
   const getCalendarCells = (date: Date): { date: Date; inMonth: boolean }[] => {
@@ -193,21 +212,83 @@ export function AppSidebar({
   const weekDayLabels = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
   const monthLabel   = miniDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
+  // ── Mobile drawer styles ────────────────────────────────────────────────────
+  const mobileAsideStyle: React.CSSProperties = isMobile ? {
+    position: 'fixed',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: Math.min(SIDEBAR_WIDTH + 40, 280),
+    zIndex: 60,
+    transform: mobileOpen ? 'translateX(0)' : 'translateX(-110%)',
+    transition: 'transform 0.28s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s',
+    boxShadow: mobileOpen ? '4px 0 32px rgba(0,0,0,0.22)' : 'none',
+  } : {
+    width: SIDEBAR_WIDTH,
+    flexShrink: 0 as const,
+    transition: 'background-color 0.2s',
+  };
+
   return (
+    <>
+      {/* ── Mobile backdrop ────────────────────────────────────────────────── */}
+      {isMobile && (
+        <div
+          aria-hidden="true"
+          onClick={onMobileClose}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 59,
+            backgroundColor: 'rgba(0,0,0,0.48)',
+            backdropFilter: 'blur(2px)',
+            WebkitBackdropFilter: 'blur(2px)',
+            opacity: mobileOpen ? 1 : 0,
+            pointerEvents: mobileOpen ? 'auto' : 'none',
+            transition: 'opacity 0.25s ease',
+          }}
+        />
+      )}
+
     <aside
-      className="flex-shrink-0 flex flex-col overflow-hidden"
+      className="flex flex-col overflow-hidden"
       style={{
-        width: SIDEBAR_WIDTH,
         backgroundColor: colors.sideBg,
         borderRight: `1px solid ${colors.border}`,
-        transition: 'background-color 0.2s',
+        ...mobileAsideStyle,
       }}
     >
+      {/* ── Mobile header: logo + close button ─────────────────────────────── */}
+      {isMobile && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 12px',
+          height: 48,
+          flexShrink: 0,
+          borderBottom: `1px solid ${colors.border}`,
+        }}>
+          <span
+            className="font-[Roboto_Mono]"
+            style={{ fontSize: 14, fontWeight: 700, color: colors.t0, letterSpacing: '-0.3px', userSelect: 'none' }}
+          >
+            BCBix
+          </span>
+          <Button
+            variant="ghost" size="icon"
+            onClick={onMobileClose}
+            className="h-8 w-8 rounded-lg"
+            style={{ color: colors.t3 }}
+            title="Close menu"
+            aria-label="Close sidebar"
+          >
+            <X style={{ width: 16, height: 16 }} />
+          </Button>
+        </div>
+      )}
+
       {/* ── Workspace switcher (fixed top, outside scroll) ── */}
-      
+
 
       {/* Thin divider */}
-      <div style={{ height: 1, backgroundColor: colors.divider, margin: '0 12px' }} />
+      {!isMobile && <div style={{ height: 1, backgroundColor: colors.divider, margin: '0 12px' }} />}
 
       {/* ── Scrollable nav ── */}
       <ScrollArea className="flex-1">
@@ -349,6 +430,7 @@ export function AppSidebar({
         </div>
       </ScrollArea>
     </aside>
+    </>
   );
 }
 

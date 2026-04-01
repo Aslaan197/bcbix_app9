@@ -8,6 +8,7 @@ import type { TargetSummary, RawTrialData } from '../lib/sessionTypes';
 import type { DataType } from './ProgramTemplatesPage';
 import { supabase } from '../lib/supabase';
 import { computeScoreFromData } from '../lib/evaluatePhaseProgression';
+import { PROMPT_HIERARCHY, PROMPT_LABELS } from '../lib/promptFading';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -957,6 +958,59 @@ export function SummaryTargetCard({ target }: Props) {
           raw ? <SetDataTable raw={raw} isDark={isDark} c={c} /> : <Empty c={c} />
         )}
       </div>
+
+      {/* ── Prompt distribution (shown when prompt fading was active) ─────── */}
+      {target.promptStats && target.promptStats.totalTrials > 0 && (
+        <div style={{
+          padding: '12px 14px', borderTop: `1px solid ${c.border}`,
+          backgroundColor: isDark ? 'rgba(79,131,204,0.05)' : 'rgba(79,131,204,0.04)',
+        }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#4F83CC', textTransform: 'uppercase', letterSpacing: '0.07em', fontFamily: 'inherit', marginBottom: 10 }}>
+            Prompt Distribution
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            {[
+              ...PROMPT_HIERARCHY.filter(lvl => (target.promptStats!.distribution[lvl] ?? 0) > 0),
+              ...Object.keys(target.promptStats!.distribution).filter(k => !PROMPT_HIERARCHY.includes(k as any) && target.promptStats!.distribution[k] > 0),
+            ].map(lvl => {
+              const count = target.promptStats!.distribution[lvl] ?? 0;
+              const pct   = Math.round((count / target.promptStats!.totalTrials) * 100);
+              const isI   = lvl === 'I';
+              return (
+                <div key={lvl} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 44 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: isI ? '#2E9E63' : c.t2, fontFamily: 'monospace' }}>{lvl}</div>
+                  <div style={{
+                    width: 36, height: Math.max(4, Math.round(pct * 0.44)),
+                    borderRadius: 3,
+                    backgroundColor: isI
+                      ? (isDark ? 'rgba(46,158,99,0.50)' : 'rgba(46,158,99,0.35)')
+                      : (isDark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.12)'),
+                  }} />
+                  <div style={{ fontSize: 10, color: c.t3, fontFamily: 'inherit' }}>{pct}%</div>
+                  <div style={{ fontSize: 9, color: c.t3, fontFamily: 'inherit' }}>({count})</div>
+                </div>
+              );
+            })}
+            <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
+              <div style={{ fontSize: 10, color: c.t3, fontFamily: 'inherit', textTransform: 'uppercase', letterSpacing: '0.06em' }}>% Independent</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: '#2E9E63', fontFamily: 'inherit' }}>
+                {target.promptStats.pctIndependent}%
+              </div>
+            </div>
+          </div>
+          {/* Prompt level labels row */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+            {[
+              ...PROMPT_HIERARCHY.filter(lvl => (target.promptStats!.distribution[lvl] ?? 0) > 0),
+              ...Object.keys(target.promptStats!.distribution).filter(k => !PROMPT_HIERARCHY.includes(k as any) && target.promptStats!.distribution[k] > 0),
+            ].map(lvl => (
+              <span key={lvl} style={{ fontSize: 9, color: c.t3, fontFamily: 'inherit', minWidth: 44, textAlign: 'center' }}>
+                {PROMPT_LABELS[lvl] ?? lvl}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ── Metrics footer ─────────────────────────────────────────────────── */}
       <div style={{

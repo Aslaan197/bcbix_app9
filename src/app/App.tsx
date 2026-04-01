@@ -101,10 +101,10 @@ function CalendarSkeleton() {
           <div key={col} style={{ flex: 1, borderRight: '1px solid var(--border)' }}>
             {Array.from({ length: ROWS }).map((_, row) => (
               <div key={row} style={{ height: 80, borderBottom: '1px solid var(--border)', padding: 4 }}>
-                {/* Randomly show a skeleton event in ~30% of cells */}
+                {/* Show a skeleton event in ~30% of cells (deterministic to avoid flicker) */}
                 {(col * ROWS + row) % 3 === 0 && (
                   <div style={{
-                    height: Math.random() > 0.5 ? 48 : 32,
+                    height: (col + row) % 2 === 0 ? 48 : 32,
                     borderRadius: 3,
                     background: 'var(--muted)', opacity: 0.3,
                   }} />
@@ -165,7 +165,12 @@ function AppInner() {
   });
 
   const handleVisibleRangeChange = (start: Date, end: Date) => {
-    setVisibleRange({ start, end });
+    setVisibleRange(prev => {
+      if (prev.start.getTime() === start.getTime() && prev.end.getTime() === end.getTime()) {
+        return prev;
+      }
+      return { start, end };
+    });
   };
 
   // Details panel
@@ -187,6 +192,9 @@ function AppInner() {
 
   // Active module
   const [activeModule, setActiveModule] = useState<ModuleId>('calendar');
+
+  // Mobile sidebar drawer
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   // Onboarding — shown once until dismissed or completed
   const [showOnboarding, setShowOnboarding] = useState<boolean>(() => {
@@ -428,6 +436,7 @@ function AppInner() {
         onToggleCollapse={() => {}}
         onOpenSettings={() => setSettingsOpen(true)}
         sessions={sessions}
+        onMenuOpen={() => setMobileSidebarOpen(true)}
       />
 
       {/* ── Below ribbon: unified left sidebar + main content ────────────── */}
@@ -436,14 +445,16 @@ function AppInner() {
         {/* ── Left: unified navigation + calendar tools ────────────────── */}
         <AppSidebar
           activeModule={activeModule}
-          onModuleChange={setActiveModule}
+          onModuleChange={(id) => { setActiveModule(id); setMobileSidebarOpen(false); }}
           currentDate={currentDate}
-          onDateSelect={setCurrentDate}
+          onDateSelect={(date) => { setCurrentDate(date); setMobileSidebarOpen(false); }}
           visibleRange={visibleRange}
+          mobileOpen={mobileSidebarOpen}
+          onMobileClose={() => setMobileSidebarOpen(false)}
         />
 
         {/* ── Main content — fills remaining space ─────────────────────── */}
-        <div className="flex-1 flex overflow-hidden min-w-0">
+        <div className="flex-1 flex overflow-hidden min-w-0 mobile-content-safe">
           {activeModule === 'calendar' ? (
             <div className="flex-1 flex flex-col overflow-hidden">
               <div className="flex-1 overflow-hidden relative">

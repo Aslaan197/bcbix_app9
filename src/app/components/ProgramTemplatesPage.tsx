@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   Search, Plus, ListFilter, MoreVertical, Pencil, Trash2, Copy,
 } from 'lucide-react';
+import type { PromptFadingConfig } from '../lib/promptFading';
 import { useTheme } from '../context/ThemeContext';
 import { useProgramTemplates } from '../context/ProgramTemplatesContext';
 import { Button } from './ui/button';
@@ -124,7 +125,13 @@ export interface Target {
   phase:        string;
   config:       TargetConfig;
   phaseProgression?: PhaseProgressionConfig;
+  /** Prompt fading configuration (ABA least-to-most fading) */
+  promptFading?:       PromptFadingConfig;
+  /** Currently active prompt level for this target (persisted to DB) */
+  currentPromptLevel?: string;
 }
+
+export type { PromptFadingConfig };
 
 export interface Category {
   id: string;

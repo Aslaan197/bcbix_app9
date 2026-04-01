@@ -2,6 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { X, Plus, ChevronDown, ChevronUp, Trash2, Check } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import type { AppColors } from '../context/ThemeContext';
+import { PromptFadingModal } from './PromptFadingModal';
+import type { PromptFadingConfig } from '../lib/promptFading';
+import { DEFAULT_PROMPT_FADING_CONFIG } from '../lib/promptFading';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from './ui/sheet';
@@ -479,10 +482,72 @@ function TargetCard({ target, index, expanded, onToggle, onUpdate, onRemove, rea
   readOnly?: boolean; c: AppColors; isDark: boolean;
 }) {
   const [showProgressionModal, setShowProgressionModal] = useState(false);
+  const [showPromptFadingModal, setShowPromptFadingModal] = useState(false);
+  const [promptFadingError, setPromptFadingError]         = useState('');
+
   const updateConfig = (updates: Partial<TargetConfig>) =>
     onUpdate({ ...target, config: { ...target.config, ...updates } });
 
   const progression = target.phaseProgression ?? DEFAULT_PHASE_PROGRESSION;
+
+  // Prompt fading
+  const fadingConfig: PromptFadingConfig = target.promptFading ?? DEFAULT_PROMPT_FADING_CONFIG;
+  const showPromptFadingToggle =
+    target.dataType === 'Task Analysis' || target.dataType === 'Custom Prompt';
+  const currentPrompts = target.config.prompts ?? [];
+  const hasPassPrompt  = currentPrompts.some(p => p.passFail === 'pass');
+
+  function handlePromptFadingToggle(enabled: boolean) {
+    setPromptFadingError('');
+    if (!enabled) {
+      // Disable — just turn it off
+      onUpdate({ ...target, promptFading: { ...fadingConfig, enabled: false } });
+      return;
+    }
+    // Enable — validate first
+    if (!hasPassPrompt) {
+      setPromptFadingError(
+        'You must mark at least one prompt level as "Pass" to enable Prompt Fading.',
+      );
+      return;
+    }
+    // Open modal to configure (toggle will revert if modal is closed without saving)
+    setShowPromptFadingModal(true);
+  }
+
+  function handlePromptFadingModalClose() {
+    // If fading was not yet enabled, revert the toggle back to OFF
+    if (!fadingConfig.enabled) {
+      // Nothing to revert in target state — modal was opened before save, so enabled is still false
+    }
+    setShowPromptFadingModal(false);
+  }
+
+  function handlePromptFadingSave(
+    config: PromptFadingConfig,
+    startingLevel: string,
+    orderedActivePrompts: import('./ProgramTemplatesPage').PromptDefinition[],
+  ) {
+    // Sync prompt order: active prompts first (in flow order), then removed prompts at the bottom
+    const removedCodes = config.excludedPromptCodes ?? [];
+    const removedPrompts = currentPrompts.filter(p => removedCodes.includes(p.code));
+    // Build merged list: ordered active prompts (which may be a subset of currentPrompts)
+    // followed by any removed ones. Preserve any extra prompts not in the flow list.
+    const activeIds = new Set(orderedActivePrompts.map(p => p.id));
+    const extraActive = currentPrompts.filter(p => !activeIds.has(p.id) && !removedCodes.includes(p.code));
+    const syncedPrompts = [...orderedActivePrompts, ...extraActive, ...removedPrompts];
+
+    onUpdate({
+      ...target,
+      promptFading:       config,
+      currentPromptLevel: startingLevel,
+      config: {
+        ...target.config,
+        prompts: syncedPrompts,
+      },
+    });
+    setPromptFadingError('');
+  }
 
   const inputStyle: React.CSSProperties = {
     height: 32, fontSize: 'var(--text-base)', fontFamily: 'inherit',
@@ -572,7 +637,7 @@ function TargetCard({ target, index, expanded, onToggle, onUpdate, onRemove, rea
           {/* Row 2: Data Type + Phase */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
             <FieldGroup label="Data Type" required>
-              <Select value={target.dataType} onValueChange={val => onUpdate({ ...target, dataType: val as DataType, config: {} })}>
+              <Select value={target.dataType} onValueChange={val => { setPromptFadingError(''); onUpdate({ ...target, dataType: val as DataType, config: {} }); }}>
                 <SelectTrigger className="focus-visible:ring-0" style={selectTriggerStyle}><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {DATA_TYPES.map(dt => <SelectItem key={dt} value={dt} style={{ fontFamily: 'inherit', fontSize: 'var(--text-base)' }}>{dt}</SelectItem>)}
@@ -750,6 +815,130 @@ function TargetCard({ target, index, expanded, onToggle, onUpdate, onRemove, rea
                   </div>
                 </FieldGroup>
               )}
+            </>
+          )}
+
+          {/* ── Prompt Fading ── */}
+          {showPromptFadingToggle && (
+            <>
+              <SectionDivider label="Prompt Fading" c={c} />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                <div>
+                  <Label style={{ fontSize: 'var(--text-base)', fontFamily: 'inherit', color: c.t0, fontWeight: 'var(--font-weight-medium)' }}>
+                    Enable Prompt Fading
+                  </Label>
+                  <p style={{ fontSize: 'var(--text-xs)', color: c.t3, fontFamily: 'inherit', margin: 0, marginTop: 1 }}>
+                    Automatically adjust prompt level based on trial performance
+                  </p>
+                </div>
+                <Switch
+                  checked={fadingConfig.enabled}
+                  className="data-[state=unchecked]:bg-zinc-300 dark:data-[state=unchecked]:bg-zinc-600"
+                  onCheckedChange={handlePromptFadingToggle}
+                />
+              </div>
+
+              {promptFadingError && (
+                <p style={{
+                  margin: 0, fontSize: 'var(--text-xs)', fontFamily: 'inherit',
+                  color: isDark ? '#f87171' : '#c0392b',
+                  padding: '6px 10px', borderRadius: 6,
+                  backgroundColor: isDark ? 'rgba(220,38,38,0.10)' : 'rgba(220,38,38,0.07)',
+                  border: `1px solid ${isDark ? 'rgba(220,38,38,0.25)' : 'rgba(220,38,38,0.18)'}`,
+                }}>
+                  {promptFadingError}
+                </p>
+              )}
+
+              {fadingConfig.enabled && (() => {
+                // Build active flow (prompts not in excluded list), in current order
+                const excludedCodes = fadingConfig.excludedPromptCodes ?? [];
+                const flowPrompts   = currentPrompts.filter(p => !excludedCodes.includes(p.code));
+                const flowText      = flowPrompts.length > 0
+                  ? flowPrompts.map(p => p.name).join(' → ')
+                  : currentPrompts.map(p => p.name).join(' → ');
+                const fadeAccPct    = Math.round((fadingConfig.accuracyThreshold ?? 0.8) * 100);
+                const fadeTrials    = fadingConfig.minTrials ?? fadingConfig.windowSize ?? 3;
+                const fadeSessions  = fadingConfig.minSessions ?? 1;
+                const regAccPct     = Math.round((fadingConfig.regressionThreshold ?? 0.5) * 100);
+                const regTrials     = fadingConfig.regressionWindowSize ?? 3;
+                const rowStyle: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 1 };
+                const labelStyle: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: c.t3, fontFamily: 'inherit', textTransform: 'uppercase', letterSpacing: '0.06em' };
+                const valueStyle: React.CSSProperties = { fontSize: 12, color: c.t1, fontFamily: 'inherit' };
+                return (
+                  <div style={{
+                    borderRadius: 'var(--radius-button)',
+                    backgroundColor: isDark ? 'rgba(79,131,204,0.08)' : 'rgba(79,131,204,0.05)',
+                    border: `1px solid ${isDark ? 'rgba(79,131,204,0.2)' : 'rgba(79,131,204,0.15)'}`,
+                    padding: '10px 12px',
+                    display: 'flex', flexDirection: 'column', gap: 8,
+                  }}>
+                    {/* Header row */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: '#2E9E63', flexShrink: 0 }} />
+                        <span style={{ fontSize: 12, fontWeight: 600, color: c.t0, fontFamily: 'inherit' }}>
+                          Prompt Fading Active
+                        </span>
+                      </div>
+                      <Button
+                        variant="outline"
+                        type="button"
+                        className="h-6 text-xs px-2.5"
+                        style={{ fontFamily: 'inherit', color: c.t2, borderColor: c.border, flexShrink: 0 }}
+                        onClick={() => setShowPromptFadingModal(true)}
+                      >
+                        Edit
+                      </Button>
+                    </div>
+
+                    {/* Flow */}
+                    <div style={rowStyle}>
+                      <span style={labelStyle}>Flow</span>
+                      <span style={valueStyle}>{flowText}</span>
+                    </div>
+
+                    {/* Move Forward */}
+                    <div style={rowStyle}>
+                      <span style={labelStyle}>Move Forward</span>
+                      <span style={valueStyle}>
+                        ≥{fadeAccPct}% over {fadeTrials} trial{fadeTrials !== 1 ? 's' : ''}
+                        {fadeSessions > 1 ? ` and ${fadeSessions} sessions` : ''}
+                      </span>
+                    </div>
+
+                    {/* Move Backward */}
+                    <div style={rowStyle}>
+                      <span style={labelStyle}>Move Backward</span>
+                      <span style={valueStyle}>
+                        {fadingConfig.regressionEnabled
+                          ? `<${regAccPct}% over ${regTrials} trial${regTrials !== 1 ? 's' : ''}`
+                          : 'Disabled'}
+                      </span>
+                    </div>
+
+                    {/* Current level */}
+                    {target.currentPromptLevel && (
+                      <div style={rowStyle}>
+                        <span style={labelStyle}>Current Level</span>
+                        <span style={{ ...valueStyle, fontFamily: 'monospace', fontWeight: 700 }}>
+                          {target.currentPromptLevel}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              <PromptFadingModal
+                open={showPromptFadingModal}
+                onClose={handlePromptFadingModalClose}
+                prompts={currentPrompts}
+                config={fadingConfig}
+                startingLevel={target.currentPromptLevel ?? currentPrompts[0]?.code ?? ''}
+                onSave={handlePromptFadingSave}
+                targetName={target.name || 'New Target'}
+              />
             </>
           )}
 
@@ -985,7 +1174,10 @@ export function ProgramTemplateSheet({
     onClose();
   };
 
-  const isValid = formData.title.trim().length > 0;
+  const taskAnalysisEmpty = formData.targets.some(
+    t => t.dataType === 'Task Analysis' && (t.config.tasks ?? []).length === 0,
+  );
+  const isValid = formData.title.trim().length > 0 && !taskAnalysisEmpty;
   const isEdit  = !!editTemplate;
 
   const inputStyle: React.CSSProperties = { height: 32, fontSize: 'var(--text-base)', fontFamily: 'inherit', backgroundColor: c.inputBg, borderColor: c.inputBorder, color: c.t0, borderRadius: 'var(--radius-button)' };
@@ -1088,7 +1280,13 @@ export function ProgramTemplateSheet({
           </div>
 
           {/* Footer */}
-          <div style={{ flexShrink: 0, padding: '12px 20px', borderTop: `1px solid ${c.border}`, display: 'flex', gap: 8, justifyContent: 'flex-end', backgroundColor: isDark ? 'rgba(255,255,255,0.015)' : 'rgba(0,0,0,0.015)' }}>
+          <div style={{ flexShrink: 0, padding: '12px 20px', borderTop: `1px solid ${c.border}`, backgroundColor: isDark ? 'rgba(255,255,255,0.015)' : 'rgba(0,0,0,0.015)' }}>
+            {taskAnalysisEmpty && !readOnly && (
+              <p style={{ margin: '0 0 8px', fontSize: 11, color: isDark ? '#f87171' : '#c0392b', fontFamily: 'inherit' }}>
+                Please add at least one task to create this target.
+              </p>
+            )}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <Button variant="ghost" size="sm" onClick={onClose} style={{ fontFamily: 'inherit', fontSize: 'var(--text-base)', color: c.t2 }}>{readOnly ? 'Close' : 'Cancel'}</Button>
             {!readOnly && (
               <Button size="sm" onClick={handleSave} disabled={!isValid}
@@ -1097,6 +1295,7 @@ export function ProgramTemplateSheet({
                 {isEdit ? 'Save Changes' : 'Create Template'}
               </Button>
             )}
+            </div>
           </div>
         </SheetContent>
       </Sheet>
